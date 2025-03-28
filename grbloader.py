@@ -419,6 +419,7 @@ class GRBModelling:
                     3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * self.avtime) ** 3.0))) ** 0.125
             self.sizer = 6. * c * self.avtime * self.gamma ** 2.
             self.depthpar = 9. / 2.
+            
         elif (self.scenario == 'Wind'):
             if self.mass_loss == 0 or self.wind_speed == 0:
                 text = "Need to define non 0 values for the mass loss rate and the wind speed!"
@@ -428,6 +429,7 @@ class GRBModelling:
             self.sizer = 4. * self.gamma ** 2 * c * self.avtime
             self.depthpar = 3. / 1.
             self._density_value()
+            
         elif (self.scenario == 'ISM'):
             self.gamma = (1. / 8.) ** (3. / 8.) * (
                     3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * self.avtime) ** 3.0))) ** 0.125
@@ -518,20 +520,24 @@ class GRBModelling:
         alpha1 = pars[2] - 1.  # fixed to be a cooling break
         alpha2 = pars[2]  # parameter 2: high energy index of the ExponentialCutoffBrokenPowerLaw
         e_cutoff = (10. ** pars[3]) * u.TeV  # parameter 3: High energy cutoff of the electron distribution (as log10)
+        
         bfield = 10. ** (pars[4]) * u.G  # parameter 4: Magnetic field (as log10)
         redf = 1. + self.redshift  # redshift factor
         doppler = self.gamma  # assumption of doppler boosting ~ Gamma
         size_reg = self.sizer * u.cm  # size of the region as astropy quantity
+        
         # volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM
         # Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration
-        vol = 4. * np.pi * self.sizer ** 2. * (
-                    self.sizer / (9. * self.gamma))
+        vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
         shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
+        
         eemax = e_cutoff.value * 1e13  # maximum energy of the electron distribution, based on 10 * cut-off value in eV
         self.shock_energy = shock_energy
         self.eta_e = eta_e
+        
         # ratio between magnetic field energy and shock energy
         self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value
+        
         ampl = 1. / u.eV  # temporary amplitude
         ECBPL = ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2,
                                                 e_cutoff)  # initialization of the electron distribution
@@ -541,14 +547,16 @@ class GRBModelling:
         ra = naima.utils.trapz_loglog(ener * eldis, ener) / naima.utils.trapz_loglog(eldis, ener)
         emin = rat / ra * 1e9 * u.eV  # calculation of the minimum injection energy. See detailed model explanation
         self.Emin = emin
+        
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         # TODO: it might need an exception handling in the following line
         amplitude = ((eta_e * shock_energy * vol) / SYN.compute_We(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
+        
         ECBPL = ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-        self.Wesyn = SYN.compute_We(Eemin=emin,
-                                    Eemax=eemax * u.eV)  # Computation of the total energy in the electron distribution
+        self.Wesyn = SYN.compute_We(Eemin=emin, Eemax=eemax * u.eV)  # Computation of the total energy in the electron distribution
         # energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption
+        
         # characteristic energy at the electron cutoff
         cutoff_charene = np.log10((synch_charene(bfield, e_cutoff)).value)
         min_synch_ene = -4  # minimum energy to start sampling the synchrotron spectrum
@@ -556,10 +564,12 @@ class GRBModelling:
         bins = int((cutoff_charene - min_synch_ene) * bins_per_decade)
         Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
         Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
+        
         # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
         phn_sy = self.calc_photon_density(Lsy, size_reg)
         self.esycool = (synch_charene(bfield, ebreak))
         self.synchedens = naima.utils.trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
+        
         # initialization of the IC component
         IC = InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         # Compute the Synchrotron component
@@ -571,6 +581,7 @@ class GRBModelling:
         # Compute the optical depth in a shell of width R/(9*Gamma) after transformation of
         # the gamma ray energy of the data in the grb frame
         tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
+        
         # Absorption calculation with thickness of shell is R/(9Gamma) for ISM scenario. METHOD 1
         self.synch_compGG = self.synch_comp * np.exp(-tauval)
         self.ic_compGG = self.ic_comp * np.exp(-tauval)
@@ -637,22 +648,27 @@ class GRBModelling:
         ener = np.logspace(9, np.log10(eemax), 100) * u.eV
         eldis = ECBPL(ener)
         ra = naima.utils.trapz_loglog(ener * eldis, ener) / naima.utils.trapz_loglog(eldis, ener)
+        
         emin = rat / ra * 1e9 * u.eV  # calculation of the minimum injection energy. See detailed model explanation
         self.Emin = emin
+        
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         amplitude = ((eta_e * shock_energy * vol) / SYN.compute_We(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
         ECBPL = ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+        
         ener = np.linspace(-6, 2, intervals)
         Esyl = []
         Lsyl = []
         phn_syl = []
         ICl = []
         icsedl = []
+        
         for i in range(intervals - 1):
             Esylc = np.logspace(ener[i], ener[i + 1], 100) * u.eV
             Esyl.append(Esylc)
             print("synch energy: ", ener[i], ener[i + 1])
+            
             Lsylc = SYN.flux(Esylc, distance=0 * u.cm)
             Lsyl.append(Lsylc)
             phn_sylc = self.calc_photon_density(Lsylc, size_reg)
