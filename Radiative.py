@@ -11,19 +11,24 @@ from astropy import units as u
 from astropy.constants import alpha, c, e, hbar, m_e, m_p, sigma_sb
 from astropy.utils.data import get_pkg_data_filename
 
-from .extern.validator import (
+from .Validator import (
     validate_array,
     validate_physical_type,
     validate_scalar,
 )
 #from .model_utils import memoize
-from .utils import trapz_loglog
+from .Utils import trapz_loglog
 
 __all__ = [
     "Synchrotron",
     "InverseCompton"
 ]
 
+# Get a new logger to avoid changing the level of the astropy logger
+log = logging.getLogger("naima.radiative")
+log.setLevel(logging.INFO)
+
+e = e.gauss
 mec2 = (m_e * c**2).cgs
 mec2_unit = u.Unit(mec2)
 
@@ -75,7 +80,7 @@ class BaseRadiative:
                 physical_type="differential energy",
             )
 
-    @memoize
+    #  @memoize
     def flux(self, photon_energy, distance=1 * u.kpc):
         """Differential flux at a given distance from the source.
 
@@ -89,16 +94,16 @@ class BaseRadiative:
             luminosity will be returned. Default is 1 kpc.
         """
 
-        spec = self._spectrum(photon_energy)
+        spectrum = self._spectrum(photon_energy)
 
         if distance != 0:
             distance = validate_scalar("distance", distance, physical_type="length")
-            spec /= 4 * np.pi * distance.to("cm") ** 2
+            flux =spectrum/ 4 * np.pi * distance.to("cm") ** 2
             out_unit = "1/(s cm2 eV)"
         else:
             out_unit = "1/(s eV)"
 
-        return spec.to(out_unit)
+        return flux.to(out_unit)
 
     def sed(self, photon_energy, distance=1 * u.kpc):
         """Spectral energy distribution at a given distance from the source.
@@ -126,17 +131,14 @@ class BaseRadiative:
     
     
 class BaseElectron(BaseRadiative):
-    """Implements gam and nelec properties"""
+    """Implements gamma and nelec properties"""
 
     def __init__(self, particle_distribution):
         super().__init__(particle_distribution)
         self.param_names = ["Eemin", "Eemax", "nEed"]
-        self._memoize = True
-        self._cache = {}  # non chiaro 
-        self._queue = []  # non chiaro
-        
+
     @property
-    def _gam(self):
+    def _gamma(self):
         """Lorentz factor array"""
         log10gmin = np.log10(self.Eemin / mec2).value
         log10gmax = np.log10(self.Eemax / mec2).value
@@ -147,16 +149,16 @@ class BaseElectron(BaseRadiative):
     @property
     def _nelec(self):
         """Particles per unit lorentz factor"""
-        pd = self.particle_distribution(self._gam * mec2)
+        pd = self.particle_distribution(self._gamma* mec2)
         return pd.to(1 / mec2_unit).value
     
     @property
-    def We(self):
+    def Etot(self):
         """Total energy in electrons used for the radiative calculation"""
-        We = trapz_loglog(self._gam * self._nelec, self._gam * mec2)
-        return We
+        Etot = trapz_loglog(self._gamma * self._nelec, self._gamma * mec2)
+        return Etot
 
-    def compute_We(self, Eemin=None, Eemax=None):
+    def compute_Etot(self, Eemin=None, Eemax=None):
         """Total energy in electrons between energies Eemin and Eemax
 
         Parameters
@@ -168,7 +170,7 @@ class BaseElectron(BaseRadiative):
             Maximum electron energy for energy content calculation.
         """
         if Eemin is None and Eemax is None:
-            We = self.We
+            Etot = self.Etot
         else:
             if Eemax is None:
                 Eemax = self.Eemax
@@ -177,15 +179,56 @@ class BaseElectron(BaseRadiative):
 
             log10gmin = np.log10(Eemin / mec2).value
             log10gmax = np.log10(Eemax / mec2).value
-            gam = np.logspace(
+            gamma = np.logspace(
                 log10gmin, log10gmax, max(10, int(self.nEed * (log10gmax - log10gmin)))
             )
-            nelec = self.particle_distribution(gam * mec2).to(1 / mec2_unit).value
-            We = trapz_loglog(gam * nelec, gam * mec2)
+            nelec = self.particle_distribution(gamma * mec2).to(1 / mec2_unit).value
+            Etot = trapz_loglog(gamma * nelec, gamma * mec2)
 
-        return We
+        return Etot
     
     
+    def set_Etot(self,Etot, Eemin=None, Eemax=None, amplitude_name=None):
+        
+        """Normalize particle distribution so that the total energy in electrons
+        between Eemin and Eemax is Etot
+
+        Parameters
+        ----------
+        Etot : :class:`~astropy.units.Quantity` float
+            Desired energy in electrons.
+
+        Eemin : :class:`~astropy.units.Quantity` float, optional
+            Minimum electron energy for energy content calculation.
+
+        Eemax : :class:`~astropy.units.Quantity` float, optional
+            Maximum electron energy for energy content calculation.
+
+        amplitude_name : str, optional
+            Name of the amplitude parameter of the particle distribution. It
+            must be accesible as an attribute of the distribution function.
+            Defaults to ``amplitude``.
+        """
+
+        Etot = validate_scalar("Etot", Etot, physical_type="energy")
+        oldEtot = self.compute_Etot(Eemin=Eemin, Eemax=Eemax)
+
+        if amplitude_name is None:
+            try:
+                self.particle_distribution.amplitude *= (Etot / oldEtot).decompose()
+            except AttributeError:
+                log.error(
+                    "The particle distribution does not have an attribute"
+                    " called amplitude to modify its normalization: you can"
+                    " set the name with the amplitude_name parameter of set_Etot"
+                )
+        else:
+            oldampl = getattr(self.particle_distribution, amplitude_name)
+            setattr(
+                self.particle_distribution,
+                amplitude_name,
+                oldampl * (Etot / oldEtot).decompose(),  # decompose in fondamental units
+            )
     
     
 class Synchrotron(BaseElectron):
@@ -268,3 +311,187 @@ class Synchrotron(BaseElectron):
         spectrum = spectrum.to("1/(s eV)")
         
         return spectrum
+    
+    
+class InverseCompton(BaseElectron):
+    """Inverse Compton emission from an electron population.
+
+    If you use this class in your research, please consult and cite
+    `Khangulyan, D., Aharonian, F.A., & Kelner, S.R.  2014, Astrophysical
+    Journal, 783, 100 <http://adsabs.harvard.edu/abs/2014ApJ...783..100K>`_
+
+    Parameters
+    ----------
+    particle_distribution : function
+        Particle distribution function, taking electron energies as a
+        `~astropy.units.Quantity` array or float, and returning the particle
+        energy density in units of number of electrons per unit energy as a
+        `~astropy.units.Quantity` array or float.
+
+    seed_photon_fields : string or iterable of strings (optional)
+        A list of gray-body or non-thermal seed photon fields to use for IC
+        calculation. Each of the items of the iterable can be either:
+
+        * A string equal to radiation fields:
+        ``CMB`` (default, Cosmic Microwave Background),2.72 K, energy densitiy of 0.261 eV/cm³
+        ``NIR`` (Near Infrared Radiation),  30 K, energy densitiy 0.5 eV/cm³
+        ``FIR`` (Far Infrared Radiation), 3000 K,energy densitiy 1 eV/cm³
+        (these are the GALPROP values for a location at a distance of 6.5 kpc from the galactic center).
+
+        * A list of length three (isotropic source) or four (anisotropic
+          source) composed of:
+
+            1. A name for the seed photon field.
+            2. Its temperature (thermal source) or energy (monochromatic or
+               non-thermal source) as a :class:`~astropy.units.Quantity`
+               instance.
+            3. Its photon field energy density as a
+               :class:`~astropy.units.Quantity` instance.
+            4. Optional: The angle between the seed photon direction and the
+               scattered photon direction as a :class:`~astropy.units.Quantity`
+               float instance.
+
+    Other parameters
+    ----------------
+    Eemin : :class:`~astropy.units.Quantity` float instance, optional
+        Minimum electron energy for the electron distribution. Default is 1
+        GeV.
+
+    Eemax : :class:`~astropy.units.Quantity` float instance, optional
+        Maximum electron energy for the electron distribution. Default is 510
+        TeV.
+
+    nEed : scalar
+        Number of points per decade in energy for the electron energy and
+        distribution arrays. Default is 300.
+    """
+
+    def __init__(self, particle_distribution, seed_photon_fields=["CMB"], **kwargs):
+        super().__init__(particle_distribution)
+        self.seed_photon_fields = self._process_input_seed(seed_photon_fields)
+        self.Eemin = 1 * u.GeV
+        self.Eemax = 1e9 * mec2
+        self.nEed = 100
+        self.param_names += ["seed_photon_fields"]
+        self.__dict__.update(**kwargs)
+        
+        
+    @staticmethod
+    def _process_input_seed(seed_photon_fields):
+        """
+        take input list of seed_photon_fields and fix them into usable format
+        """
+
+        Tcmb = 2.72548 * u.K  # 0.00057 K
+        Tfir = 30 * u.K
+        ufir = 0.5 * u.eV / u.cm**3
+        Tnir = 3000 * u.K
+        unir = 1.0 * u.eV / u.cm**3
+
+        # Allow for seed_photon_fields definitions of the type 'CMB-NIR-FIR' or
+        # 'CMB')
+            
+        if not isinstance(seed_photon_fields, list):
+            seed_photon_fields = seed_photon_fields.split("-") 
+
+
+        result = OrderedDict()
+
+        for idx, inseed in enumerate(seed_photon_fields):
+            seed = {}
+            if isinstance(inseed, str):
+                name = inseed
+                seed["type"] = "thermal"
+                if inseed == "CMB":
+                    seed["T"] = Tcmb
+                    seed["u"] = ar * Tcmb**4
+                    seed["isotropic"] = True
+                elif inseed == "FIR":
+                    seed["T"] = Tfir
+                    seed["u"] = ufir
+                    seed["isotropic"] = True
+                elif inseed == "NIR":
+                    seed["T"] = Tnir
+                    seed["u"] = unir
+                    seed["isotropic"] = True
+                else:
+                    log.warning(
+                        "Will not use seed {0} because it is not "
+                        "CMB, FIR or NIR".format(inseed)
+                    )
+                    raise TypeError
+                
+            elif type(inseed) is list and (len(inseed) == 3 or len(inseed) == 4):
+                
+                # if len==3 is isotropic instead is not beacuse it has also the angle 
+                isotropic = len(inseed) == 3
+
+                if isotropic:
+                    name, T, uu = inseed
+                    seed["isotropic"] = True
+                else:
+                    name, T, uu, theta = inseed
+                    seed["isotropic"] = False
+                    seed["theta"] = validate_scalar(
+                        "{0}-theta".format(name), theta, physical_type="angle"
+                    )
+
+                thermal = T.unit.physical_type == "temperature"
+
+                if thermal:
+                    seed["type"] = "thermal"
+                    validate_scalar(
+                        "{0}-T".format(name),
+                        T,
+                        domain="positive",
+                        physical_type="temperature",
+                    )
+                    seed["T"] = T
+                    if uu == 0:
+                        seed["u"] = ar * T**4
+                    else:
+                        # pressure has same physical type as energy density
+                        validate_scalar(
+                            "{0}-u".format(name),
+                            uu,
+                            domain="positive",
+                            physical_type="pressure",
+                        )
+                        seed["u"] = uu
+                else:
+                    seed["type"] = "array"
+                    # Ensure everything is in arrays
+                    T = u.Quantity((T,)).flatten()
+                    uu = u.Quantity((uu,)).flatten()
+
+                    seed["energy"] = validate_array(
+                        "{0}-energy".format(name),
+                        T,
+                        domain="positive",
+                        physical_type="energy",
+                    )
+
+                    if np.isscalar(seed["energy"]) or seed["energy"].size == 1:
+                        seed["photon_density"] = validate_scalar(
+                            "{0}-density".format(name),
+                            uu,
+                            domain="positive",
+                            physical_type="pressure",
+                        )
+                    else:
+                        if uu.unit.physical_type == "pressure":
+                            uu /= seed["energy"] ** 2
+                        seed["photon_density"] = validate_array(
+                            "{0}-density".format(name),
+                            uu,
+                            domain="positive",
+                            physical_type="differential number density",
+                        )
+            else:
+                raise TypeError(
+                    "Unable to process seed photon field: {0}".format(inseed)
+                )
+
+            result[name] = seed
+
+        return result

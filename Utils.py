@@ -6,7 +6,7 @@ import numpy as np
 from astropy import log
 from astropy.table import QTable, Table
 
-from .extern.validator import validate_array, validate_scalar
+from Validator import validate_array, validate_scalar
 
 
 def trapz_loglog(y, x, axis=-1, intervals=False):
