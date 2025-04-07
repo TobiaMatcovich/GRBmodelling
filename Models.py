@@ -7,28 +7,26 @@ import numpy as np
 from astropy.table import Table
 from astropy.utils.data import get_pkg_data_filename
 
-from .extern.validator import (
+from Validator import (
     validate_array,
     validate_physical_type,
     validate_scalar,
 )
-from .model_utils import memoize
-from .radiative import Bremsstrahlung, InverseCompton, PionDecay, Synchrotron
+#from .model_utils import memoize
+#from .radiative import Bremsstrahlung, InverseCompton, PionDecay, Synchrotron
 
 __all__ = [
     "BrokenPowerLaw",
     "ExponentialCutoffPowerLaw",
     "PowerLaw",
-    "LogParabola",
+    #"LogParabola",
     "ExponentialCutoffBrokenPowerLaw",
 ]
 
 def _validate_ene(ene):
     if isinstance(ene, dict) or isinstance(ene, Table):
         try:
-            ene = validate_array(
-                "energy", u.Quantity(ene["energy"]), physical_type="energy"
-            )
+            ene = validate_array("energy", u.Quantity(ene["energy"]), physical_type="energy")
         except KeyError:
             raise TypeError("Table or dict does not have 'ene' column")
     else:
@@ -76,7 +74,6 @@ class PowerLaw:
         xx = e / e_0
         return amplitude * xx ** (-alpha)
     
-    
     # @memoize non definito qui ma in NAIMA si
     def _calc(self, e):
         return self.eval(
@@ -119,13 +116,9 @@ class ExponentialCutoffPowerLaw:
 
     def __init__(self, amplitude, e_0, alpha, e_cutoff, beta=1.0):
         self.amplitude = amplitude
-        self.e_0 = validate_scalar(
-            "e_0", e_0, domain="positive", physical_type="energy"
-        )
+        self.e_0 = validate_scalar("e_0", e_0, domain="positive", physical_type="energy")
         self.alpha = alpha
-        self.e_cutoff = validate_scalar(
-            "e_cutoff", e_cutoff, domain="positive", physical_type="energy"
-        )
+        self.e_cutoff = validate_scalar("e_cutoff", e_cutoff, domain="positive", physical_type="energy")
         self.beta = beta
 
     @staticmethod
@@ -167,8 +160,7 @@ class BrokenPowerLaw:
         Power law index for x < x_break
     alpha_2 : float
         Power law index for x > x_break
-
-
+    
     Notes
     -----
     Model formula (two cases):
@@ -186,19 +178,15 @@ class BrokenPowerLaw:
 
     def __init__(self, amplitude, e_0, e_break, alpha_1, alpha_2):
         self.amplitude = amplitude
-        self.e_0 = validate_scalar(
-            "e_0", e_0, domain="positive", physical_type="energy"
-        )
-        self.e_break = validate_scalar(
-            "e_break", e_break, domain="positive", physical_type="energy"
-        )
+        self.e_0 = validate_scalar("e_0", e_0, domain="positive", physical_type="energy")
+        self.e_break = validate_scalar("e_break", e_break, domain="positive", physical_type="energy")
         self.alpha_1 = alpha_1
         self.alpha_2 = alpha_2
 
     @staticmethod
     def eval(e, amplitude, e_0, e_break, alpha_1, alpha_2):
         
-        K = np.where(e < e_break, 1, (e_break / e_0) ** (alpha_2 - alpha_1))
+        K = np.where(e < e_break, 1, (e_break / e_0) ** (alpha_2 - alpha_1)) # per far coincidere le due formo in e=e_break
         alpha = np.where(e < e_break, alpha_1, alpha_2)
         return amplitude * K * (e / e_0) ** -alpha
 
@@ -240,10 +228,6 @@ class ExponentialCutoffBrokenPowerLaw:
     beta : float, optional
         Exponential cutoff rapidity. Default is 1.
 
-    See Also
-    --------
-    PowerLaw, ExponentialCutoffPowerLaw, LogParabola
-
     Notes
     -----
     Model formula (two case):
@@ -270,17 +254,11 @@ class ExponentialCutoffBrokenPowerLaw:
 
     def __init__(self, amplitude, e_0, e_break, alpha_1, alpha_2, e_cutoff, beta=1.0):
         self.amplitude = amplitude
-        self.e_0 = validate_scalar(
-            "e_0", e_0, domain="positive", physical_type="energy"
-        )
-        self.e_break = validate_scalar(
-            "e_break", e_break, domain="positive", physical_type="energy"
-        )
+        self.e_0 = validate_scalar("e_0", e_0, domain="positive", physical_type="energy")
+        self.e_break = validate_scalar("e_break", e_break, domain="positive", physical_type="energy")
         self.alpha_1 = alpha_1
         self.alpha_2 = alpha_2
-        self.e_cutoff = validate_scalar(
-            "e_cutoff", e_cutoff, domain="positive", physical_type="energy"
-        )
+        self.e_cutoff = validate_scalar("e_cutoff", e_cutoff, domain="positive", physical_type="energy")
         self.beta = beta
 
     @staticmethod

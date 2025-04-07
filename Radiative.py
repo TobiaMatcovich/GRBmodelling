@@ -11,13 +11,13 @@ from astropy import units as u
 from astropy.constants import alpha, c, e, hbar, m_e, m_p, sigma_sb
 from astropy.utils.data import get_pkg_data_filename
 
-from .Validator import (
+from Validator import (
     validate_array,
     validate_physical_type,
     validate_scalar,
 )
 #from .model_utils import memoize
-from .Utils import trapz_loglog
+from Utils import trapz_loglog
 
 __all__ = [
     "Synchrotron",
@@ -98,10 +98,16 @@ class BaseRadiative:
 
         if distance != 0:
             distance = validate_scalar("distance", distance, physical_type="length")
-            flux =spectrum/ 4 * np.pi * distance.to("cm") ** 2
+            flux =spectrum/ (4 * np.pi * distance.to("cm") ** 2)
             out_unit = "1/(s cm2 eV)"
+            print("flux unit:", flux.unit)
+            print("expected unit:", out_unit)
+ 
         else:
             out_unit = "1/(s eV)"
+            print("flux unit:", flux.unit)
+            print("expected unit:", out_unit)
+
 
         return flux.to(out_unit)
 
@@ -303,15 +309,37 @@ class Synchrotron(BaseElectron):
         factor=Num/Den
         
         # Critical energy in erg 
-        Ec = (3 * e.value * hbar.cgs.value * self.B.to("G").value * self._gam**2)/ (2 * (m_e * c).cgs.value)
+        Ec = (3 * e.value * hbar.cgs.value * self.B.to("G").value * self._gamma**2)/ (2 * (m_e * c).cgs.value)
         
         EgEc=validated_energy.to("erg").value/np.vstack(Ec)        
         dNdE = factor * Gtilde(EgEc)
-        spectrum = (trapz_loglog(np.vstack(self._nelec) * dNdE, self._gam, axis=0) / u.s / u.erg )
+        spectrum = (trapz_loglog(np.vstack(self._nelec) * dNdE, self._gamma, axis=0) / u.s / u.erg )
         spectrum = spectrum.to("1/(s eV)")
         
         return spectrum
-    
+
+def G12(x, param):
+    """
+    Eqs 18,19,20 of Khangulyan et al (2014)
+    """
+    alpha, a, beta, b = param
+    G0 = (np.pi**2 / 6.0 + x) * np.exp(-x)
+    tmp = 1 + b * x**beta
+    g = 1.0 / (a * x**alpha / tmp + 1.0)
+    return G0 * g
+
+
+def G34(x, param):
+    """
+    Eqs 20, 24, 25 of Khangulyan et al (2014)
+    """
+    alpha, a, beta, b, c = param
+    pi26 = np.pi**2 / 6.0
+    tmp = (1 + c * x) / (1 + pi26 * c * x)
+    G0 = pi26 * tmp * np.exp(-x)
+    tmp = 1 + b * x**beta
+    g = 1.0 / (a * x**alpha / tmp + 1.0)
+    return G0 * g    
     
 class InverseCompton(BaseElectron):
     """Inverse Compton emission from an electron population.
@@ -384,8 +412,8 @@ class InverseCompton(BaseElectron):
 
         Tcmb = 2.72548 * u.K  # 0.00057 K
         Tfir = 30 * u.K
-        ufir = 0.5 * u.eV / u.cm**3
         Tnir = 3000 * u.K
+        ufir = 0.5 * u.eV / u.cm**3
         unir = 1.0 * u.eV / u.cm**3
 
         # Allow for seed_photon_fields definitions of the type 'CMB-NIR-FIR' or
@@ -493,5 +521,125 @@ class InverseCompton(BaseElectron):
                 )
 
             result[name] = seed
+            
+    @staticmethod
+    def _iso_ic_on_planck(electron_energy, soft_photon_temperature, gamma_energy):
+        """
+        IC cross-section for isotropic interaction with a blackbody photon
+        spectrum following Eq. 14 of Khangulyan, Aharonian, and Kelner 2014,
+        ApJ 783, 100 (`arXiv:1310.7971 <http://www.arxiv.org/abs/1310.7971>`_).
 
-        return result
+        `electron_energy` and `gamma_energy` are in units of m_ec^2
+        `soft_photon_temperature` is in units of K
+        """
+        Ktomec2 = 1.6863699549e-10   # conversion factor form Kelvin to m-ec^2 units
+        soft_photon_temperature *= Ktomec2  # convert the temperature
+
+        gamma_energy = gamma_energy[:, None]
+        # Parameters from Eqs 26, 27
+        a3 = [0.606, 0.443, 1.481, 0.540, 0.319]
+        a4 = [0.461, 0.726, 1.457, 0.382, 6.620]
+        
+        # gamma_energy is the upscattered photon energy 
+        z = gamma_energy / electron_energy
+        x = z / (1 - z) / (4.0 * electron_energy * soft_photon_temperature)
+        # Eq. 14
+        cross_section = z**2 / (2 * (1 - z)) * G34(x, a3) + G34(x, a4)
+        tmp = (soft_photon_temperature / electron_energy) ** 2
+        
+        # r0 = (e**2 / m_e / c**2).to('cm')
+        # (2 * r0 ** 2 * m_e ** 3 * c ** 4 / (pi * hbar ** 3)).cgs
+        tmp *= 2.6318735743809104e16 
+        cross_section = tmp * cross_section
+        # gamma energy less then the production elctron energy and a relativistiv elctron
+        validity_condition= (gamma_energy < electron_energy) * (electron_energy > 1)  
+        return np.where(validity_condition, cross_section, np.zeros_like(cross_section))
+
+
+    @staticmethod
+    def _ani_ic_on_planck(electron_energy, soft_photon_temperature, gamma_energy, theta):
+        """
+        IC cross-section for anisotropic interaction with a blackbody photon
+        spectrum following Eq. 11 of Khangulyan, Aharonian, and Kelner 2014,
+        ApJ 783, 100 (`arXiv:1310.7971 <http://www.arxiv.org/abs/1310.7971>`_).
+
+        `electron_energy` and `gamma_energy` are in units of m_ec^2
+        `soft_photon_temperature` is in units of K
+        `theta` is in radians
+        """
+        Ktomec2 = 1.6863699549e-10         # conversion factor form Kelvin to m-ec^2 units
+        soft_photon_temperature *= Ktomec2 # convert the temperature
+
+        gamma_energy = gamma_energy[:, None]
+        # Parameters from Eqs 21, 22
+        a1 = [0.857, 0.153, 1.840, 0.254]
+        a2 = [0.691, 1.330, 1.668, 0.534]
+        z = gamma_energy / electron_energy
+        ttheta = 2.0 * electron_energy * soft_photon_temperature * (1.0 - np.cos(theta))
+        x = z / (1 - z) / ttheta
+        # Eq. 11
+        cross_section = z**2 / (2 * (1 - z)) * G12(x, a1) + G12(x, a2)
+        tmp = (soft_photon_temperature / electron_energy) ** 2
+        
+        # r0 = (e**2 / m_e / c**2).to('cm')
+        # (2 * r0 ** 2 * m_e ** 3 * c ** 4 / (pi * hbar ** 3)).cgs
+        tmp *= 2.6318735743809104e16       
+        cross_section = tmp * cross_section
+        # gamma energy less then the production elctron energy and a relativistiv elctron
+        validity_conditon = (gamma_energy < electron_energy) * (electron_energy > 1)
+        return np.where(validity_conditon, cross_section, np.zeros_like(cross_section))
+    
+    def _calc_specic(self, seed, outspecene):
+        log.debug("_calc_specic: Computing IC on {0} seed photons...".format(seed))
+
+        Eph = (outspecene / mec2).decompose().value
+        # Catch numpy RuntimeWarnings of overflowing exp (which are then
+        # discarded anyway)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            if self.seed_photon_fields[seed]["type"] == "thermal":
+                T = self.seed_photon_fields[seed]["T"]
+                uf = (self.seed_photon_fields[seed]["u"] / (ar * T**4)).decompose()
+                if self.seed_photon_fields[seed]["isotropic"]:
+                    gamint = self._iso_ic_on_planck(self._gamma, T.to("K").value, Eph)
+                else:
+                    theta = self.seed_photon_fields[seed]["theta"].to("rad").value
+                    gamint = self._ani_ic_on_planck(
+                        self._gamma, T.to("K").value, Eph, theta
+                    )
+            else:
+                uf = 1
+                gamint = self._iso_ic_on_monochromatic(
+                    self._gamma,
+                    self.seed_photon_fields[seed]["energy"],
+                    self.seed_photon_fields[seed]["photon_density"],
+                    Eph,
+                )
+
+            lum = uf * Eph * trapz_loglog(self._nelec * gamint, self._gamma)
+        lum = lum * u.Unit("1/s")
+
+        return lum / outspecene  # return differential spectrum in 1/s/eV
+    
+    def _spectrum(self, photon_energy):
+        """Compute differential IC spectrum for energies in ``photon_energy``.
+
+        Compute IC spectrum using IC cross-section for isotropic interaction
+        with a blackbody photon spectrum following Khangulyan, Aharonian, and
+        Kelner 2014, ApJ 783, 100 (`arXiv:1310.7971
+        <http://www.arxiv.org/abs/1310.7971>`_).
+
+        Parameters
+        ----------
+        photon_energy : :class:`~astropy.units.Quantity` instance
+            Photon energy array.
+        """
+        outspecene = _validate_ene(photon_energy)
+
+        self.specic = []
+
+        for seed in self.seed_photon_fields:
+            # Call actual computation, detached to allow changes in subclasses
+            self.specic.append(self._calc_specic(seed, outspecene).to("1/(s eV)"))
+
+        return np.sum(u.Quantity(self.specic), axis=0)
