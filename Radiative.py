@@ -94,11 +94,11 @@ class BaseRadiative:
             luminosity will be returned. Default is 1 kpc.
         """
 
-        spectrum = self._spectrum(photon_energy)
+        flux = self._spectrum(photon_energy)
 
         if distance != 0:
             distance = validate_scalar("distance", distance, physical_type="length")
-            flux =spectrum/ (4 * np.pi * distance.to("cm") ** 2)
+            flux =flux/ (4 * np.pi * distance.to("cm") ** 2)
             out_unit = "1/(s cm2 eV)"
             #print("flux unit:", flux.unit)
             #print("expected unit:", out_unit)
@@ -403,121 +403,82 @@ class InverseCompton(BaseElectron):
         self.param_names += ["seed_photon_fields"]
         self.__dict__.update(**kwargs)
         
+
     @staticmethod
     def _process_input_seed(seed_photon_fields):
         """
-        take input list of seed_photon_fields and fix them into usable format
+        Process seed_photon_fields input and return a standardized OrderedDict.
         """
+        # Definizioni predefinite per i campi noti
+        known_fields = {
+            "CMB": {"T": 2.72548 * u.K, "u": None},
+            "FIR": {"T": 30 * u.K, "u": 0.5 * u.eV / u.cm**3},
+            "NIR": {"T": 3000 * u.K, "u": 1.0 * u.eV / u.cm**3},
+        }
 
-        Tcmb = 2.72548 * u.K  # 0.00057 K
-        Tfir = 30 * u.K
-        ufir = 0.5 * u.eV / u.cm**3
-        Tnir = 3000 * u.K
-        unir = 1.0 * u.eV / u.cm**3
-
-        # Allow for seed_photon_fields definitions of the type 'CMB-NIR-FIR' or
-        # 'CMB'
-        if type(seed_photon_fields) is not list:
+        if not isinstance(seed_photon_fields, list):
             seed_photon_fields = seed_photon_fields.split("-")
 
         result = OrderedDict()
 
-        for idx, inseed in enumerate(seed_photon_fields):
+        for inseed in seed_photon_fields:
             seed = {}
+
+            # Caso: stringa nota (CMB, FIR, NIR)
             if isinstance(inseed, str):
                 name = inseed
-                seed["type"] = "thermal"
-                if inseed == "CMB":
-                    seed["T"] = Tcmb
-                    seed["u"] = ar * Tcmb**4
-                    seed["isotropic"] = True
-                elif inseed == "FIR":
-                    seed["T"] = Tfir
-                    seed["u"] = ufir
-                    seed["isotropic"] = True
-                elif inseed == "NIR":
-                    seed["T"] = Tnir
-                    seed["u"] = unir
-                    seed["isotropic"] = True
-                else:
-                    log.warning(
-                        "Will not use seed {0} because it is not "
-                        "CMB, FIR or NIR".format(inseed)
-                    )
-                    raise TypeError
-            elif type(inseed) is list and (len(inseed) == 3 or len(inseed) == 4):
-                isotropic = len(inseed) == 3
+                if name not in known_fields:
+                    raise ValueError(f"Unknown seed field: {name}")
+                T = known_fields[name]["T"]
+                u_val = known_fields[name]["u"] or (ar * T**4)
+                seed.update({
+                    "type": "thermal",
+                    "T": T,
+                    "u": u_val,
+                    "isotropic": True
+                })
 
-                if isotropic:
-                    name, T, uu = inseed
-                    seed["isotropic"] = True
-                else:
-                    name, T, uu, theta = inseed
-                    seed["isotropic"] = False
-                    seed["theta"] = validate_scalar(
-                        "{0}-theta".format(name), theta, physical_type="angle"
-                    )
+            # Caso: definizione avanzata come lista [name, T, u, theta?]
+            elif isinstance(inseed, list) and len(inseed) in (3, 4):
+                name, T, uu = inseed[:3]
+                theta = inseed[3] if len(inseed) == 4 else None
+                isotropic = theta is None
 
                 thermal = T.unit.physical_type == "temperature"
 
                 if thermal:
-                    seed["type"] = "thermal"
-                    validate_scalar(
-                        "{0}-T".format(name),
-                        T,
-                        domain="positive",
-                        physical_type="temperature",
-                    )
-                    seed["T"] = T
-                    if uu == 0:
-                        seed["u"] = ar * T**4
-                    else:
-                        # pressure has same physical type as energy density
-                        validate_scalar(
-                            "{0}-u".format(name),
-                            uu,
-                            domain="positive",
-                            physical_type="pressure",
-                        )
-                        seed["u"] = uu
+                    validate_scalar(f"{name}-T", T, domain="positive", physical_type="temperature")
+                    u_val = ar * T**4 if uu == 0 else validate_scalar(f"{name}-u", uu, domain="positive", physical_type="pressure")
+                    seed.update({
+                        "type": "thermal",
+                        "T": T,
+                        "u": u_val,
+                        "isotropic": isotropic
+                    })
                 else:
-                    seed["type"] = "array"
-                    # Ensure everything is in arrays
-                    T = u.Quantity((T,)).flatten()
-                    uu = u.Quantity((uu,)).flatten()
+                    energy = validate_array(f"{name}-energy", u.Quantity(T).flatten(), domain="positive", physical_type="energy")
+                    density = u.Quantity(uu).flatten()
+                    if density.unit.physical_type == "pressure":
+                        density /= energy**2
+                    density = validate_array(f"{name}-density", density, domain="positive", physical_type="differential number density")
 
-                    seed["energy"] = validate_array(
-                        "{0}-energy".format(name),
-                        T,
-                        domain="positive",
-                        physical_type="energy",
-                    )
+                    seed.update({
+                        "type": "array",
+                        "energy": energy,
+                        "photon_density": density,
+                        "isotropic": isotropic
+                    })
 
-                    if np.isscalar(seed["energy"]) or seed["energy"].size == 1:
-                        seed["photon_density"] = validate_scalar(
-                            "{0}-density".format(name),
-                            uu,
-                            domain="positive",
-                            physical_type="pressure",
-                        )
-                    else:
-                        if uu.unit.physical_type == "pressure":
-                            uu /= seed["energy"] ** 2
-                        seed["photon_density"] = validate_array(
-                            "{0}-density".format(name),
-                            uu,
-                            domain="positive",
-                            physical_type="differential number density",
-                        )
+                if not isotropic:
+                    seed["theta"] = validate_scalar(f"{name}-theta", theta, physical_type="angle")
+
             else:
-                raise TypeError(
-                    "Unable to process seed photon field: {0}".format(inseed)
-                )
+                raise TypeError(f"Unable to process seed photon field: {inseed}")
 
             result[name] = seed
 
-        return result  
-    
+        return result
+
             
     @staticmethod
     def _iso_ic_on_planck(electron_energy, soft_photon_temperature, gamma_energy):
