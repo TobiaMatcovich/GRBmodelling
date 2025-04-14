@@ -53,6 +53,11 @@ def _validate_ene(ene):
     return ene
 
 
+
+def heaviside(x):
+    return (np.sign(x) + 1) / 2.0
+
+
 class BaseRadiative:
     """Base class for radiative models
 
@@ -546,6 +551,52 @@ class InverseCompton(BaseElectron):
         # gamma energy less then the production elctron energy and a relativistiv elctron
         validity_conditon = (gamma_energy < electron_energy) * (electron_energy > 1)
         return np.where(validity_conditon, cross_section, np.zeros_like(cross_section))
+    
+    @staticmethod
+    def _iso_ic_on_monochromatic(electron_energy, seed_energy, seed_edensity, gamma_energy):
+        """
+        IC cross-section for an isotropic interaction with a monochromatic
+        photon spectrum following Eq. 22 of Aharonian & Atoyan 1981, Ap&SS 79,
+        321 (`http://adsabs.harvard.edu/abs/1981Ap%26SS..79..321A`_)
+        """
+        photE0 = (seed_energy / mec2).decompose().value
+        phn = seed_edensity
+
+        # electron_energy = electron_energy[:, None]
+        gamma_energy = gamma_energy[:, None]
+        photE0 = photE0[:, None, None]
+        phn = phn[:, None, None]
+
+        b = 4 * photE0 * electron_energy
+        w = gamma_energy / electron_energy
+        q = w / (b * (1 - w))
+        fic = (
+            2 * q * np.log(q)
+            + (1 + 2 * q) * (1 - q)
+            + (1.0 / 2.0) * (b * q) ** 2 * (1 - q) / (1 + b * q)
+        )
+
+        gamint = fic * heaviside(1 - q) * heaviside(q - 1.0 / (4 * electron_energy**2))
+        gamint[np.isnan(gamint)] = 0.0
+
+        if phn.size > 1:
+            phn = phn.to(1 / (mec2_unit * u.cm**3)).value
+            gamint = trapz_loglog(gamint * phn / photE0, photE0, axis=0)  # 1/s
+        else:
+            phn = phn.to(mec2_unit / u.cm**3).value
+            gamint *= phn / photE0**2
+            gamint = gamint.squeeze()
+
+        # gamint /= mec2.to('erg').value
+
+        # r0 = (e**2 / m_e / c**2).to('cm')
+        # sigt = ((8 * np.pi) / 3 * r0**2).cgs
+        sigt = 6.652458734983284e-25
+        c = 29979245800.0
+
+        gamint *= (3.0 / 4.0) * sigt * c / electron_energy**2
+
+        return gamint
     
     def _calc_specic(self, seed, outspecene):
         log.debug("_calc_specic: Computing IC on {0} seed photons...".format(seed))
