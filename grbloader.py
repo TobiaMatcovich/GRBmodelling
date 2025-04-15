@@ -351,6 +351,7 @@ class GRBModelling:
         else:
             print("WARNING: No dataset given,")
             print("the code can be used only for computation of theoretical curves")
+            
         self.Eiso = eiso  # Eiso of the burst
         self.density = dens  # ambient density around the burst units of cm-3
         self.tstart = tstart  # units of s
