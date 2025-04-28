@@ -1,0 +1,611 @@
+
+
+import logging
+import os
+import warnings
+from collections import OrderedDict
+from multiprocessing import Pool
+
+import astropy
+from astropy.table import Table, hstack
+import astropy.units as u
+from astropy.io import ascii
+import astropy.constants as con
+from astropy.constants import alpha, c, e, hbar, m_e, m_p, sigma_sb
+from astropy.utils.data import get_pkg_data_filename
+from astropy.cosmology import WMAP9 as cosmo
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from Validator import (
+    validate_array,
+    validate_physical_type,
+    validate_scalar,
+)
+#from .model_utils import memoize
+from Utils import trapz_loglog
+
+import Models
+import Radiative
+
+import matplotlib.pyplot as plt
+
+from matplotlib import cm
+from matplotlib.colors import Normalize, LinearSegmentedColormap
+from matplotlib.colorbar import ColorbarBase
+
+
+#-------------------------------------------------- static variables: ---------------------------------------------
+
+m_e = con.m_e.cgs.value
+c = con.c.cgs.value
+mec2_eV = (con.m_e * con.c ** 2.).to('eV').value
+h = con.h.cgs.value
+el = con.e.gauss.value
+erg_to_eV = 624150912588.3258  # conversion from erg to eV
+sigma_T = con.sigma_T.cgs.value
+mpc2 = (con.m_p * con.c ** 2.).to('eV')
+mpc2_erg = mpc2.to('erg').value
+
+
+#------------------------------------------------- static methods --------------------------------------------------
+
+def sigma_gammagamma(Eph1, Eph2):
+    """
+    gamma-gamma cross section averaged over scattering angle
+    The value is returned in cm2
+
+    Equation 5) from Eungwanichayapant, A.; Aharonian, F., 2009
+    (originally from Aharonian, 2004) Approximation good within 3%
+
+    Parameters
+    ----------
+       Eph1 : array_like
+         numpy array of energy of gamma ray in eV
+       Eph2 : array_like
+         np.array of energy of target photon in eV
+    Returns
+    -------
+        cross_section : astropy.quantity
+          angle average cross section for gamma gamma absorption
+    """
+
+    CMene = Eph1 * Eph2 / (mec2_eV * mec2_eV)
+    mask = CMene > 1.  # mask condition to account for the threshold effect.
+    res = np.full(CMene.shape, 0.)
+    
+    res[mask] = 3. / (2. * CMene[mask] * CMene[mask]) * sigma_T * \
+                ((CMene[mask] + 0.5 * np.log(CMene[mask]) - 1. / 6. + 1. / (2. * CMene[mask]))
+                * np.log(np.sqrt(CMene[mask]) + np.sqrt(CMene[mask] - 1.)) -
+                (CMene[mask] + 4. / 9. - 1. / (9. * CMene[mask])) * np.sqrt(1. - (1. / CMene[mask])))
+    cross_section = res * u.cm * u.cm
+    return cross_section
+
+
+def absorption_coeff(egamma, targetene, target):
+    """
+    Returns the absorption coefficient K that will then be
+    spatially integrated.
+
+    K(E) = \int_e sigma_gg(E,e) * dn/de * de
+
+    where E is the gamma ray energy, e is the energy of the target photon and dn/de is the number distribution
+    of the target photon field. (Inner integral of equation 3.24 of Aharonian, 2004)
+
+    Parameters
+    ----------
+      egamma : array_like
+        Energy of the gamma ray photon as astropy unit quantity. Format e.g. [1.]*u.TeV
+      targetene : array_like
+        energy array of the photon distribution e.g. [1.,2.]*u.eV
+      target : array_like
+        dnde value of the target photon distribution as 1/(eV cm3)
+    Returns
+    -------
+      abs_coeff : astropy.quantity
+        absorption coefficient as astropy quantity (should have units 1/u.cm)
+    """
+
+    product = sigma_gammagamma(np.vstack(egamma.to('eV')),targetene.to('eV').value) * target  # make sure the units are correct
+    abs_coeff = trapz_loglog(product, targetene, axis=1)
+    return abs_coeff
+
+
+def tau_val(Egamma, targetene, target, size):
+    """
+    Optical depth assuming homogeneous radiation field.
+
+    From equation 3.24 of Aharonian, 2004 with the assumption of homogeneous photon field.
+
+    Parameters
+    ----------
+      Egamma    : array_like
+        Energy of the gamma ray photon as astropy unit quantity. Format e.g. [1.]*u.TeV
+      targetene : array_like
+        energy array of the photon distribution e.g. [1.,2.]*u.eV
+      target    : array_like
+        dnde value of the target photon distribution as 1/(eV cm3)
+      size      : astropy.quantity
+        size of the integration length as astropy spatial quantity (normally units of cm)
+    Returns
+    -------
+      tau : array_like
+        optical depth
+    """
+
+    coeff = absorption_coeff(Egamma, targetene, target)
+    tau = size.to('cm') * coeff
+    return tau
+
+def cutoff_limit(bfield):
+    """
+     Account for the maximum energy of particles
+     for synchrotron emission. Due to the effect of the synchrotron burn-off
+     due to the balancing of acceleration and losses of the particle in magnetic field.
+     Expression 18 from Aharonian, 2000
+
+    Parameters
+    ----------
+      bfield : float
+        Magnetic field intensity to be given in units of Gauss
+    Returns
+    -------
+      cutoff_ev : float
+        log10 of the cutoff energy in units of TeV
+    """
+
+    eff = 1.  # acceleration efficiency parameter (eff >= 1)
+    cutoff = ((3. / 2.) ** (3. / 4.) *np.sqrt(1. / (el ** 3. * bfield)) * (m_e ** 2. * c ** 4.)) * eff ** (-0.5) * u.erg
+    cutoff_TeV = (cutoff.value * erg_to_eV * 1e-12)
+    return np.log10(cutoff_TeV)
+
+def synch_cooltime_partene(bfield, partene):
+    """
+    Computes the cooling time for an electron with energy 'partene' in
+    Bfield. Returns in units of seconds
+    Equation 1 from Aharonian, 2000
+
+    Parameters
+    ----------
+       bfield : astropy.quantity
+         magnetic field as astropy quantity (u.G)
+       partene : astropy.quantity
+         particle energy as astropy quantity (u.eV)
+    Returns
+    -------
+       tcool : astropy.quantity
+         Synchrotron cooling time as astropy quantity (u.s)
+    """
+
+    bf = bfield.to('G').value
+    epar = partene.to('erg').value
+    tcool = (6. * np.pi * m_e ** 4. * c ** 3.) / (sigma_T * m_e ** 2. * epar * bf ** 2.)
+    return tcool * u.s
+
+def synch_charene(bfield, partene):
+    """
+    Function to return
+    characteristic energy of synchrotron spectrum
+
+    Equation 3.30 from Aharonian, 2004 (adapted for electrons)
+
+    Parameters
+    ----------
+       bfield : astropy.quantity
+         magnetic field as astropy quantity (u.G)
+       partene : astropy.quantity
+         particle energy as astropy quantity (u.eV)
+    Returns
+    -------
+       charene : astropy.quantity
+         synchrotron characteristic energy as astropy quantity (u.eV)
+    """
+
+    bf = bfield.to('G').value
+    epar = partene.to('erg').value
+    charene = np.sqrt(3. / 2.) * (h * el * bf) / (2. * np.pi * (m_e ** 3. * c ** 5.)) * epar ** 2.  # in ergs
+    return charene * erg_to_eV * u.eV
+
+
+
+class GRBModel1:
+    """
+    The spectral modelling presented here is based on the picture of particle acceleration at the forward shock,
+    which propagates outwards through the circumburst material (see   `R. D. Blandford, C. F. McKee,Physics of Fluids19, 1130 (1976)`).
+    
+    It is possible to choose between 3 scenario options:
+      - ISM : homogeneous interstellar medium of density n
+      - Wind : density of the material with r^-2 dependance and dictated by a certain value of mass loss rate
+               of the star `mass_loss` (in solar masses per year) and a certain wind speed `wind_speed` (in km/s)
+      - average : an ISM scenario but with parameters of the size of the shock that are an average of the 2 previous cases
+      
+    Attributes
+    ----------
+    Eiso : float
+        Isotropic energy of the GRB (in units of erg)
+    density : float
+        density of the circumburst material (in units of cm-3)
+    dataset : list of astropy.table.table.Table
+        table of observational data. Attribute exists only if a list of tables is passed in the initialization
+    tstart : float
+        starting time of the observational interval (in units of seconds)
+    tstop : float
+        stop time of the observational interval (in units of seconds)
+    avtime : float
+        average time of the observational interval
+    redshift : float
+        redshift of the GRB
+    Dl : astropy.quantity
+        luminosity distance of the GRB (as astropy quantity)
+    pars : list
+        list of parameters of the electron distribution (es. ExponentialCutoffBrokenPowerLaw)
+    labels : list
+        list of parameter names (as strings)
+    scenario : string
+        dictates the density of the circumburst material (DEFAULT = 'ISM')
+    mass_loss : float
+        mass loss rate of the progenitor (in solar masses per year; for `Wind` scenario only)
+    wind_speed : float
+        wind speed of the progenitor star (in km per second; for `Wind` scenario only)
+    cooling_constrain : boolean
+        If True adds to the prior a constrain for which cooling time at break ~ age of the system. DEFAULT = True
+        If synch_nolimit = True, this option does not do anything.
+    synch_nolimit : boolean
+        False for standard SSC model, True for synchtrotron dominated model. DEFAULT = False
+    gamma : float
+        Lorentz factor of the GRB at time avtime
+    sizer : float
+        radius of the expanding shell at time avtime
+    shock_energy : astropy.quantity (u.erg)
+        available energy in the shock
+    Emin : astropy.quantity
+        minimum injection energy of the electron distribution
+    Wesyn : astropy.quantity
+        total energy in the electron distribution
+    eta_e : float
+        fraction of available energy ending in the electron distribution
+    eta_b : float
+        fraction of available energy ending in magnetic field energy density
+    synch_comp : numpy.array
+        synchrotron component of the emission
+    ic_comp : numpy.array
+        inverse compton component of the emission
+    synch_compGG : numpy.array
+        synchrotron component of the emission
+        with gamma gamma absorption included METHOD 1
+    ic_compGG : numpy.array
+        inverse compton component of the emission
+        with gammagamma absorption included METHOD 1
+    synch_compGG2 : numpy.array
+        synchrotron component of the emission
+        with gamma gamma absorption included METHOD 2
+    ic_compGG2 : numpy.array
+        inverse compton component of the emission
+        with gammagamma absorption included METHOD 2
+    naimamodel : bound method
+        bound method to the model function
+        associated with function load_model_and_prior()
+    lnprior : bound method
+        bound method to the prior function
+        associated with function load_model_and_prior()
+    """
+
+    def __init__(self, eiso, dens, tstart, tstop, redshift, pars, labels,
+                 scenario='ISM',
+                 mass_loss=0,
+                 wind_speed=0,
+                 cooling_constrain=True,
+                 synch_nolimit=False,
+                 data=None):
+        """
+        Class initialization
+
+        Parameters
+        ----------
+          eiso : float
+            Isotropic energy of the gamma ray burst (given in erg)
+          dens : float
+            density of the circumburst material (given in cm-3)
+          data : list
+            list of astropy table with the obs. data. Optional, theoretical line can be computed anyway
+          tstart : float
+            start time of the observational interval (given in seconds after trigger)
+          tstop : float
+            stop time of the observational interval (given in seconds after trigger)
+          redshift : float
+            redshift of the GRB
+          pars : list
+            list of parameters passed to the model function
+          labels : list
+            names of the parameters passed to the model
+          scenario : string
+            'ISM', 'Wind' or 'average'
+          mass_loss : float
+            mass loss rate of the progenitor star (in solar masses per year for Wind scenario, no effect otherwise)
+          wind_speed : float
+            wind speed of the progenitor star (in km/s for Wind scenario, no effect otherwise)
+          cooling_constrain : bool
+            boolean to add a contrain on cooling time at break ~ age of of the system in the prior function
+          synch_nolimit : bool
+            boolean to select the synchrotron dominated model
+        """
+
+        if isinstance(data, list):
+            if all(isinstance(x, astropy.table.table.Table) for x in data):
+                self.dataset = data  # dataset astropy table
+            else:
+                print("WARNING: Not all the elements in your list are formatted as astropy tables!")
+                print("Not loading the dataset,")
+                print("the code can be used only for computation of theoretical curves")
+        else:
+            print("WARNING: No dataset given,")
+            print("the code can be used only for computation of theoretical curves")
+            
+        self.Eiso = eiso  # Eiso of the burst
+        self.density = dens  # ambient density around the burst units of cm-3
+        self.tstart = tstart  # units of s
+        self.tstop = tstop  # units of s
+        self.avtime = (tstart + tstop) / 2.  # units of s
+        self.redshift = redshift
+        self.Dl = cosmo.luminosity_distance(redshift)  # luminosity distance with units
+        self.pars = pars  # parameters for the fit
+        self.labels = labels  # labels of the parameters
+        self.scenario = scenario  # string valid options: 'average', 'Wind', 'ISM'
+        self.mass_loss = mass_loss  # Value of the mass loss rate of progenitor in solar masses per year
+        self.wind_speed = wind_speed  # Value of the wind speed of the projenitor in km/s
+        self.cooling_constrain = cooling_constrain  # if True add in the prior a constrain on cooling break
+        self.synch_nolimit = synch_nolimit  # boolean for SSC (=0) or synchrotron without cut-off limit model (=1)
+        self.gamma = 0  # Gamma factor of the GRB at certain time
+        self.sizer = 0  # External radius of the shell
+        self.depthpar = 0  # private attribute to control the depth of the shock: d = R/(self.depthpar * Gamma)
+        self.shock_energy = 0  # Available energy in the shock
+        self.Emin = 0 * u.eV  # Minimum injection energy for the particle distribution
+        self.Wesyn = 0  # Total energy in the electrons
+        self.eta_e = 0  # Fraction of thermal energy going into electron energy
+        self.eta_b = 0  # Fraction of thermal energy going into magnetic field
+        self.synch_comp = 0  # Spectrum of the synchrotron component
+        self.ic_comp = 0  # Spectrum of the IC component
+        self.naimamodel = 0  # Model used for the fit - initialized in later function
+        self.lnprior = 0  # Prior used for the fit - initialized in later function
+        self.load_model_and_prior()  # Loads the NAIMA model and the relative prior
+        self.esycool = 0  # Characteristic synchrotron energy corresponding to the break energy of the electrons
+        self.synchedens = 0  # total energy density of synchrotron photons
+        self.synch_compGG = 0  # synchrotron component of the model with gammagamma absorption with METHOD 1
+        self.ic_compGG = 0  # inverse compton component of the model with gammagamma absorption with METHOD 1
+        self.synch_compGG2 = 0  # synchrotron component of the model with gammagamma absorption with METHOD 2
+        self.ic_compGG2 = 0  # inverse compton component of the model with gammagamma absorption with METHOD 2
+        
+        
+        
+    def gammaval(self):
+        """
+        Computes the Lorentz factor and the size of the region
+        Expression from Blandford&McKee,1976.
+
+        Gamma^2 = E_iso / Mc^2
+
+        where M is the mass of the material swept by the shock which can be computed in case of homogenous
+        density or wind scenario, with the density that decreases as r^-2 (see documentation file for more details).
+        The calculation of the radius uses the relation
+
+        R = A * Gamma^2 * (ct)
+
+        where A can be 4 (for Wind scenario), 8 (ISM scenario), 6 (for the average)
+
+        Time is the average between the tstart and tstop.
+        The functions takes automatically the initialization parameters
+        """
+
+            
+        if (self.scenario == 'ISM'):
+            self.gamma = (1. / 8.) ** (3. / 8.) * (3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * self.avtime) ** 3.0))) ** 0.125
+            self.sizer = 8. * c * self.avtime * self.gamma ** 2.
+            self.depthpar = 9. / 1.
+        else:
+            text = "Chosen scenario: %s\n" \
+                   "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
+            raise ValueError(text)          
+          
+    def calc_photon_density(self, Lsy, sizereg):
+        """
+        This is a thin shell, we use the approximation that the radiation is emitted in a region with radius sizereg.
+        (see e.g. Atoyan, Aharonian, 1996). No correction factor (2.24) needed because of thin shell.
+
+        Parameters
+        ----------
+            Lsy : array_like
+              emitted photons per second (units of 1/s)
+            sizereg : astropy.quantiy
+              size of the region as astropy u.cm quantity
+              
+        Returns
+        -------
+          ph_dens : array_like
+            Photon density in the considered emission region.
+        """
+        
+        return Lsy / (4. * np.pi * sizereg ** 2. * c * u.cm / u.s)
+      
+      
+    def _SSSmodel_ind1fixed(self, pars, data):
+        """"
+        Example set-up of the free parameters for the SSC implementation
+        Index1 of the BPL is fixed as Index2 - 1 (cooling break).Index2 of the BPL is free
+        The minimum energy and the normalization of the electron distribution are derived from the parameter eta_e
+
+        Parameters
+        ----------
+           pars : list
+             parameters of the model as list
+           data : astropy.table.table.Table
+             observational dataset (as astropy table) or
+             if interested only in theoretical lines, astropy table
+             containing only a column of energy values.
+        Returns
+        -------
+           model : array_like
+             values of the model in correspondence of the data
+           electron_distribution : tuple
+             electron distribution as tuple energy, electron_distribution(energy) in units of erg
+        """
+
+        eta_e = 10. ** pars[0]  # parameter 0: fraction of available energy ending in non-thermal electrons
+        ebreak = 10. ** pars[1] * u.TeV  # parameter 1: linked to break energy of the electron distribution (as log10)
+        alpha1 = pars[2] - 1.  # fixed to be a cooling break
+        alpha2 = pars[2]  # parameter 2: high energy index of the ExponentialCutoffBrokenPowerLaw
+        e_cutoff = (10. ** pars[3]) * u.TeV  # parameter 3: High energy cutoff of the electron distribution (as log10)
+        
+        bfield = 10. ** (pars[4]) * u.G  # parameter 4: Magnetic field (as log10)
+        redf = 1. + self.redshift  # redshift factor
+        
+        self.gammaval() 
+        doppler = self.gamma  # assumption of doppler boosting ~ Gamma
+        size_reg = self.sizer * u.cm  # size of the region as astropy quantity
+        
+        # ------------------- Volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM ----------------
+        #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
+        vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
+        shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
+        self.shock_energy = shock_energy
+        
+        eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
+        self.eta_e = eta_e
+        self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
+        
+        #---------------------------------------------------------------------------------------------------------------------------
+        ampl = 1. / u.eV  # temporary amplitude
+        ECBPL = Models.ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
+        energies = np.logspace(9, np.log10(eemax), 100) * u.eV
+        #---------------------------------------------------------------------------------------------------------------------------
+        
+        eldis = ECBPL(energies)
+        fact1 = eta_e * self.gamma * mpc2
+        fact2 = trapz_loglog(energies * eldis, energies) / trapz_loglog(eldis, energies)
+        emin = fact1 / fact2 * 1e9 * u.eV  # calculation of the minimum injection energy. See detailed model explanation
+        self.Emin = emin
+        
+        #  (https://www.cv.nrao.edu/~sransom/web/Ch5.html) 
+        SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+        #----------------------------------------------------------------------------------------------------------------------------
+        
+        amplitude = ((eta_e * shock_energy * vol) / SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
+        
+        ECBPL = Models.ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
+        SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+        self.Wesyn = SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
+        
+        #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption ---------
+        
+        cutoff_charene = np.log10((synch_charene(bfield, e_cutoff)).value)      # characteristic energy at the electron cutoff
+        min_synch_ene = -4                                                      # minimum energy to start sampling the synchrotron spectrum
+        bins_per_decade = 20                                                    # 20 bins per decade to sample the synchrotron spectrum
+        bins = int((cutoff_charene - min_synch_ene) * bins_per_decade)
+        
+        #---------------------------------------------------------------------------------------------------------------------
+        Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
+        Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
+        phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
+        #----------------------------------------------------------------------------------------------------------------------
+        self.esycool = (synch_charene(bfield, ebreak))
+        self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
+        
+        
+        IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+        
+        #--------------------------- SYN and IC in detector frame-----------------------------------
+        self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
+        self.ic_comp = (doppler ** 2.) * IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
+        model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
+
+        #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
+        # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
+        tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
+        
+        #--------------------------------METHOD 1 ---------------phn_sy = self.calc_photon_density(Lsy, size_reg)------------------------------------------------------
+        #self.synch_compGG = self.synch_comp * np.exp(-tauval)
+        #self.ic_compGG = self.ic_comp * np.exp(-tauval)
+        #model = (self.synch_compGG + self.ic_compGG) 
+
+        #-------------------------------- METHOD 2 --------------------------------------------------------------------
+        mask = tauval > 1.0e-4  # fixed level, you can choose another one
+        self.synch_compGG2 = self.synch_comp.copy()
+        self.ic_compGG2 = self.ic_comp.copy()
+        self.synch_compGG2[mask] = self.synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+        self.ic_compGG2[mask] = self.ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+        model = (self.synch_compGG2 + self.ic_compGG2) 
+        
+        #-------------------- save the electron distrivution ---------------------------
+        ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
+        eldis = ECBPL(ener)  # Compute the electron distribution
+        electron_distribution = (ener, eldis)
+        
+        return model,model_wo_abs, electron_distribution  # returns model and electron distribution
+
+
+    def get_Benergydensity(self):
+        """
+        Returns the magnetic field energy density in cgs system
+        """
+
+        bedens = (10. ** self.pars[4]) ** 2. / (8. * np.pi)  # free parameter 4 is the B field
+        return bedens * u.erg / u.cm / u.cm / u.cm
+
+    def get_Eltotenergy(self):
+        """
+        Returns total energy in the electron distribution
+        """
+
+        return self.Wesyn  # which is the total electron energy injected
+      
+    def quick_plot_sed(self, emin, emax, ymin, ymax):
+        
+        """ Parameters
+          emin : float
+            minimum energy of the interval (in eV)
+          emax : float
+            maximum energy of the interval (in eV)
+          ymin : float
+            minimum value for the y-axis (in erg/cm2/s)
+          ymax : float
+            maximum value for the y-axis (in erg/cm2/s)
+        """
+        
+        bins = int(np.log10(emax/emin) * 20.)  # use 20 bins per decade
+        newene = Table([np.logspace(np.log10(emin), np.log10(emax), bins) * u.eV], names=['energy'])  # energy in eV
+        self.naimamodel = self._SSSmodel_ind1fixed
+        
+        model = self.naimamodel(self.pars, newene)  # make sure we are computing the model for the new energy range
+        
+        def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
+            new_cmap = LinearSegmentedColormap.from_list(
+                f'trunc({cmap.name},{minval:.2f},{maxval:.2f})',
+                cmap(np.linspace(minval, maxval, n)))
+            return new_cmap
+          
+        vmin = 0.1
+        vmax = 1
+        original_cmap = plt.cm.plasma
+        cmap1 = truncate_colormap(original_cmap, vmin, vmax)
+
+        # Plot
+        plt.figure(figsize=(12,8))
+        plt.rc('font', family='sans')
+        plt.rc('mathtext', fontset='custom')
+
+        plt.loglog(newene,model,lw=2,label='SSC',c=cmap1(0.7))
+
+        plt.xlabel('Photon energy [{0}]'.format(newene.unit.to_string('latex_inline')))
+        plt.ylabel('$E^2 dN/dE$ [{0}]'.format(model.unit.to_string('latex_inline')))
+
+        plt.xlim(emin, emax)
+        plt.ylim(ymin, ymax)
+        plt.tight_layout()
+        plt.legend(loc='lower left')
+
+
+        plt.title(f"SSC test",fontsize=15)
+        plt.grid(True, which="both", linestyle="--", alpha=0.6)
+        plt.show
+                 
+      

@@ -551,7 +551,7 @@ class GRBModelling:
         
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         # TODO: it might need an exception handling in the following line
-        amplitude = ((eta_e * shock_energy * vol) / SYN.compute_We(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
+        amplitude = ((eta_e * shock_energy * vol) / SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
         
         ECBPL = ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
         SYN = Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
@@ -573,36 +573,34 @@ class GRBModelling:
         
         # initialization of the IC component
         IC = InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-        # Compute the Synchrotron component
+        
+        #--------------------------- SYn and IC in detector frame-----------------------------------
         self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
-        # Compute the IC component
         self.ic_comp = (doppler ** 2.) * IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
-        # model = (self.synch_comp+self.ic_comp) # Total model without absorption
+        model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
-        # Compute the optical depth in a shell of width R/(9*Gamma) after transformation of
-        # the gamma ray energy of the data in the grb frame
+        #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
+        # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
         tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
         
-        # Absorption calculation with thickness of shell is R/(9Gamma) for ISM scenario. METHOD 1
-        self.synch_compGG = self.synch_comp * np.exp(-tauval)
-        self.ic_compGG = self.ic_comp * np.exp(-tauval)
-        # model = (self.synch_compGG + self.ic_compGG) # Total model after absorption with METHOD 1
+        #-------------------------------- METHOD 1 -----------------------------------
+        #self.synch_compGG = self.synch_comp * np.exp(-tauval)
+        #self.ic_compGG = self.ic_comp * np.exp(-tauval)
+        #model = (self.synch_compGG + self.ic_compGG) 
 
-        # Absorption calculation that takes into account the fact that the gamma rays are produced
-        # in the same region where they are absorbed. See Rybicki & Lightman eq. 1.29 - 1.30
-        # with thickness of the shell R/(9Gamma) for ISM scenario. METHOD 2
-        mask = tauval > 1.0e-4
+        #-------------------------------- METHOD 2 -----------------------------------
+        mask = tauval > 1.0e-4  # fixed level, you can choose another one
         self.synch_compGG2 = self.synch_comp.copy()
         self.ic_compGG2 = self.ic_comp.copy()
         self.synch_compGG2[mask] = self.synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
         self.ic_compGG2[mask] = self.ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
-        model = (self.synch_compGG2 + self.ic_compGG2)  # Total model after absorption with METHOD 2
-
-        ener = np.logspace(np.log10(emin.to('GeV').value), 8,
-                           500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
+        model = (self.synch_compGG2 + self.ic_compGG2) 
+        
+        #-------------------- save the electron distrivution ---------------------------
+        ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
         eldis = ECBPL(ener)  # Compute the electron distribution
         electron_distribution = (ener, eldis)
-        return model, electron_distribution  # returns model and electron distribution
+        return model,model_wo_abs, electron_distribution  # returns model and electron distribution
 
     def naimamodel_iccomps(self, pars, data, intervals):
         """
@@ -904,3 +902,5 @@ class GRBModelling:
         plt.legend()
         plt.xlim(emin, emax)
         plt.ylim(ymin, ymax)
+
+
