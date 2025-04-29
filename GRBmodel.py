@@ -368,7 +368,7 @@ class GRBModel1:
         self.ic_comp = 0  # Spectrum of the IC component
         self.naimamodel = 0  # Model used for the fit - initialized in later function
         self.lnprior = 0  # Prior used for the fit - initialized in later function
-        self.load_model_and_prior()  # Loads the NAIMA model and the relative prior
+        self.load_model_and_prior()  # Loads the model and the relative prior
         self.esycool = 0  # Characteristic synchrotron energy corresponding to the break energy of the electrons
         self.synchedens = 0  # total energy density of synchrotron photons
         self.synch_compGG = 0  # synchrotron component of the model with gammagamma absorption with METHOD 1
@@ -427,6 +427,30 @@ class GRBModel1:
         
         return Lsy / (4. * np.pi * sizereg ** 2. * c * u.cm / u.s)
       
+    def load_model_and_prior(self):
+        """
+        Associates the bound methods
+        naimamodel and lnprior to the chosen
+        model and prior function.
+
+        Modify here if you want to change the model
+        or the priors
+        """
+
+        self.gammaval()  # call the function to compute the basic GRB initialization parameters
+        self.naimamodel = self._SSSmodel_ind1fixed
+        #-------------------------- change here for the prior functions -------------------------------------
+        # For performance it is better to use if statements here to avoid having them in the prior function
+        # the prior function is called everytime and it's better if it does not have if statements inside
+        """
+        if self.synch_nolimit:
+            self.lnprior = self._lnprior_ind2free_nolim
+        else:
+            if self.cooling_constrain:
+                self.lnprior = self._lnprior_ind2free_wlim_wcooling_constrain
+            else:
+                self.lnprior = self._lnprior_ind2free_wlim
+        """
       
     def _SSSmodel_ind1fixed(self, pars, data):
         """"
@@ -459,7 +483,6 @@ class GRBModel1:
         bfield = 10. ** (pars[4]) * u.G  # parameter 4: Magnetic field (as log10)
         redf = 1. + self.redshift  # redshift factor
         
-        self.gammaval() 
         doppler = self.gamma  # assumption of doppler boosting ~ Gamma
         size_reg = self.sizer * u.cm  # size of the region as astropy quantity
         
@@ -495,7 +518,7 @@ class GRBModel1:
         SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         self.Wesyn = SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
         
-        #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption ---------
+        #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption -----------
         
         cutoff_charene = np.log10((synch_charene(bfield, e_cutoff)).value)      # characteristic energy at the electron cutoff
         min_synch_ene = -4                                                      # minimum energy to start sampling the synchrotron spectrum
@@ -511,18 +534,20 @@ class GRBModel1:
         self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
         
         
-        IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+        IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], 
+                                      #Eemin=emin, Eemax=eemax * u.eV, 
+                                      nEed=20)
         
         #--------------------------- SYN and IC in detector frame-----------------------------------
         self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
-        self.ic_comp = (doppler ** 2.) * IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
+        self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
         #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
         # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
         tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
         
-        #--------------------------------METHOD 1 ---------------phn_sy = self.calc_photon_density(Lsy, size_reg)------------------------------------------------------
+        #--------------------------------METHOD 1 ---------------------------------------------------------------------
         #self.synch_compGG = self.synch_comp * np.exp(-tauval)
         #self.ic_compGG = self.ic_comp * np.exp(-tauval)
         #model = (self.synch_compGG + self.ic_compGG) 
@@ -558,7 +583,7 @@ class GRBModel1:
 
         return self.Wesyn  # which is the total electron energy injected
       
-    def quick_plot_sed(self, emin, emax, ymin, ymax):
+    def plot_sed(self, emin, emax, ymin, ymax):
         
         """ Parameters
           emin : float
@@ -573,9 +598,12 @@ class GRBModel1:
         
         bins = int(np.log10(emax/emin) * 20.)  # use 20 bins per decade
         newene = Table([np.logspace(np.log10(emin), np.log10(emax), bins) * u.eV], names=['energy'])  # energy in eV
-        self.naimamodel = self._SSSmodel_ind1fixed
-        
+        #self.naimamodel = self._SSSmodel_ind1fixed
+  
         model = self.naimamodel(self.pars, newene)  # make sure we are computing the model for the new energy range
+        SSC=model[0]
+        
+        #---------------------------------------------- Color ----------------------------------------------
         
         def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
             new_cmap = LinearSegmentedColormap.from_list(
@@ -588,17 +616,19 @@ class GRBModel1:
         original_cmap = plt.cm.plasma
         cmap1 = truncate_colormap(original_cmap, vmin, vmax)
 
-        # Plot
+        #----------------------------------------------- Plot ----------------------------------------------
         plt.figure(figsize=(12,8))
         plt.rc('font', family='sans')
         plt.rc('mathtext', fontset='custom')
 
-        plt.loglog(newene,model,lw=2,label='SSC',c=cmap1(0.7))
+        plt.loglog(newene,SSC,lw=2,label='SSC',c=cmap1(0.7))
+        plt.loglog(newene,self.synch_comp,lw=2,label='SC',c=cmap1(0.2))
+        plt.loglog(newene,self.ic_comp,lw=2,label='SC',c=cmap1(0.5))
 
-        plt.xlabel('Photon energy [{0}]'.format(newene.unit.to_string('latex_inline')))
-        plt.ylabel('$E^2 dN/dE$ [{0}]'.format(model.unit.to_string('latex_inline')))
+        plt.xlabel('Photon energy [{0}]'.format(newene['energy'].unit.to_string('latex_inline')))
+        plt.ylabel('$E^2 dN/dE$ [{0}]'.format(SSC.unit.to_string('latex_inline')))
 
-        plt.xlim(emin, emax)
+        #plt.xlim(emin, emax)
         plt.ylim(ymin, ymax)
         plt.tight_layout()
         plt.legend(loc='lower left')
@@ -607,5 +637,5 @@ class GRBModel1:
         plt.title(f"SSC test",fontsize=15)
         plt.grid(True, which="both", linestyle="--", alpha=0.6)
         plt.show
-                 
+        #---------------------------------------------------------------------------------------------------- 
       
