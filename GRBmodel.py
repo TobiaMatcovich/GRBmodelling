@@ -438,7 +438,7 @@ class GRBModel1:
         """
 
         self.gammaval()  # call the function to compute the basic GRB initialization parameters
-        self.naimamodel = self._SSSmodel_ind1fixed
+        self.naimamodel = self._SSCmodel_ind1fixed
         #-------------------------- change here for the prior functions -------------------------------------
         # For performance it is better to use if statements here to avoid having them in the prior function
         # the prior function is called everytime and it's better if it does not have if statements inside
@@ -452,7 +452,7 @@ class GRBModel1:
                 self.lnprior = self._lnprior_ind2free_wlim
         """
       
-    def _SSSmodel_ind1fixed(self, pars, data):
+    def _SSCmodel_ind1fixed(self, pars, data):
         """"
         Example set-up of the free parameters for the SSC implementation
         Index1 of the BPL is fixed as Index2 - 1 (cooling break).Index2 of the BPL is free
@@ -474,7 +474,8 @@ class GRBModel1:
              electron distribution as tuple energy, electron_distribution(energy) in units of erg
         """
 
-        eta_e = 10. ** pars[0]  # parameter 0: fraction of available energy ending in non-thermal electrons
+        eta_e = 10. ** pars[0] # parameter 0: fraction of available energy ending in non-thermal electrons
+        self.eta_e = eta_e
         ebreak = 10. ** pars[1] * u.TeV  # parameter 1: linked to break energy of the electron distribution (as log10)
         alpha1 = pars[2] - 1.  # fixed to be a cooling break
         alpha2 = pars[2]  # parameter 2: high energy index of the ExponentialCutoffBrokenPowerLaw
@@ -493,7 +494,6 @@ class GRBModel1:
         self.shock_energy = shock_energy
         
         eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
-        self.eta_e = eta_e
         self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
         
         #---------------------------------------------------------------------------------------------------------------------------
@@ -535,7 +535,7 @@ class GRBModel1:
         
         
         IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], 
-                                      #Eemin=emin, Eemax=eemax * u.eV, 
+                                      Eemin=emin, Eemax=eemax * u.eV, 
                                       nEed=20)
         
         #--------------------------- SYN and IC in detector frame-----------------------------------
@@ -583,7 +583,7 @@ class GRBModel1:
 
         return self.Wesyn  # which is the total electron energy injected
       
-    def plot_sed(self, emin, emax, ymin, ymax):
+    def plot_sed_fast(self, emin, emax, ymin, ymax):
         
         """ Parameters
           emin : float
@@ -621,12 +621,86 @@ class GRBModel1:
         plt.rc('font', family='sans')
         plt.rc('mathtext', fontset='custom')
 
-        plt.loglog(newene,SSC,lw=2,label='SSC',c=cmap1(0.7))
-        plt.loglog(newene,self.synch_comp,lw=2,label='SC',c=cmap1(0.2))
-        plt.loglog(newene,self.ic_comp,lw=2,label='SC',c=cmap1(0.5))
+        plt.loglog(newene,SSC,lw=2,label='SSC',c=cmap1(0.2))
+        plt.loglog(newene,self.synch_compGG2,lw=2,label='SYN',c=cmap1(0.4))
+        plt.loglog(newene,self.ic_compGG2,lw=2,label='IC',c=cmap1(0.7))
 
         plt.xlabel('Photon energy [{0}]'.format(newene['energy'].unit.to_string('latex_inline')))
         plt.ylabel('$E^2 dN/dE$ [{0}]'.format(SSC.unit.to_string('latex_inline')))
+
+        #plt.xlim(emin, emax)
+        plt.ylim(ymin, ymax)
+        plt.tight_layout()
+        plt.legend(loc='lower left')
+
+
+        plt.title(f"SSC test",fontsize=15)
+        plt.grid(True, which="both", linestyle="--", alpha=0.6)
+        plt.show
+        #---------------------------------------------------------------------------------------------------- 
+        
+    def plot_sed(self, emin, emax,order_bottom):
+        
+        """ Parameters
+          emin : float
+            minimum energy of the interval (in eV)
+          emax : float
+            maximum energy of the interval (in eV)
+        """
+        
+        bins = int(np.log10(emax/emin) * 20.)  # use 20 bins per decade
+        newene = Table([np.logspace(np.log10(emin), np.log10(emax), bins) * u.eV], names=['energy'])  # energy in eV
+  
+        model = self.naimamodel(self.pars, newene)  # make sure we are computing the model for the new energy range
+        
+        SSC=model[0]
+        SSC_no_abs=model[1]
+        
+        ymax=np.max(SSC).value
+        ymin=np.min(SSC).value
+        
+        ordine = int(np.ceil(np.log10(ymax)))
+        ymax = 10**ordine
+        ymin = 10**(ordine - order_bottom)
+
+        #---------------------------------------------- Color ----------------------------------------------
+        
+        def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
+            new_cmap = LinearSegmentedColormap.from_list(
+                f'trunc({cmap.name},{minval:.2f},{maxval:.2f})',
+                cmap(np.linspace(minval, maxval, n)))
+            return new_cmap
+          
+      
+        cmap1 = truncate_colormap(plt.cm.plasma, 0.1, 1)
+        #cmap2 = truncate_colormap(plt.cm.viridis, 0.1, 0.9)
+        
+        #----------------------------------------------- Report --------------------------------------------
+        print("---------------------------------------------------------------------------------------------------")
+        Gamma = '\u0393'
+        eta = '\u03B7'
+        print(f"{Gamma} factor = {self.gamma}")
+        print(f"{eta}_B = {self.eta_b}")
+        print(f"{eta}_e = {self.eta_e}")
+        print(f"Shell Radius",self.sizer*u.cm)
+        print("---------------------------------------------------------------------------------------------------")
+
+        #----------------------------------------------- Plot ----------------------------------------------
+        plt.figure(figsize=(12,8))
+        plt.rc('font', family='sans')
+        plt.rc('mathtext', fontset='custom')
+
+        plt.loglog(newene,self.synch_compGG2,lw=2,label='SYN',c=cmap1(0.4))
+        plt.loglog(newene,self.ic_compGG2,lw=2,label='IC',c=cmap1(0.7))
+        plt.loglog(newene,SSC,lw=2,label='SSC',c=cmap1(0.2))
+        
+        #plt.loglog(newene,self.synch_comp,lw=2,label='SYN-no absorbtion',c=cmap2(0.4))
+        #plt.loglog(newene,self.ic_comp,lw=2,label='IC-no absorbtion',c=cmap2(0.7))
+        #plt.loglog(newene,SSC_no_abs,lw=2,label='SSC-no absorbtion',c=cmap2(0.2))
+        
+
+        plt.xlabel('Photon energy [{0}]'.format(newene['energy'].unit.to_string('latex_inline')),fontsize=15)
+        plt.ylabel('$E^2 dN/dE$ [{0}]'.format(SSC.unit.to_string('latex_inline')),fontsize=15)
 
         #plt.xlim(emin, emax)
         plt.ylim(ymin, ymax)
