@@ -499,16 +499,22 @@ class GRBModel1:
         #---------------------------------------------------------------------------------------------------------------------------
         ampl = 1. / u.eV  # temporary amplitude
         ECBPL = Models.ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
-        energies = np.logspace(9, np.log10(eemax), 100) * u.eV
-        #---------------------------------------------------------------------------------------------------------------------------
-        
+        #---------------------------------------------- E min iterative process ----------------------------------------------------
+        Emin_0=1e9*u.eV
+        Emin_0_exp=9
+        energies = np.logspace(Emin_0_exp, np.log10(eemax), 100) * u.eV
         eldis = ECBPL(energies)
         fact1 = eta_e * self.gamma * mpc2
-        fact2 = trapz_loglog(energies * eldis, energies) / trapz_loglog(eldis, energies)
-        emin = fact1 / fact2 * 1e9 * u.eV  # calculation of the minimum injection energy. See detailed model explanation
-        self.Emin = emin
+        E_medium = trapz_loglog(energies * eldis, energies) / trapz_loglog(eldis, energies)
+        K=E_medium/fact1
         
-        #  (https://www.cv.nrao.edu/~sransom/web/Ch5.html) 
+        emin= Emin_0/K  # calculation of the minimum injection energy. See detailed model explanationn(! iteration)
+        self.Emin = emin
+        #--------------------------------------------- E min non iterative process -------------------------------------------------
+        
+        #emin=(p-2)/(p-1)*fact1 # p=? abbiamo una broken powerlaw, quindi sono 2 
+        
+        #----------- (https://www.cv.nrao.edu/~sransom/web/Ch5.html)------------------------
         SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         #----------------------------------------------------------------------------------------------------------------------------
         
@@ -538,7 +544,7 @@ class GRBModel1:
                                       Eemin=emin, Eemax=eemax * u.eV, 
                                       nEed=20)
         
-        #--------------------------- SYN and IC in detector frame-----------------------------------
+        #--------------------------- SYN and IC in detector frame-------------------------------------
         self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
         self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
