@@ -49,15 +49,6 @@ sigma_T = con.sigma_T.cgs.value
 mpc2 = (con.m_p * con.c ** 2.).to('eV')
 mpc2_erg = mpc2.to('erg').value
 
-def E_theta_gaussian(theta,E0,thetac):
-    
-    E=E0*np.exp(-(theta**2)/(2*thetac**2))
-    return E 
-
-def E_theta_powerlaw(theta, E0, thetac,b):
-    
-    E=E0*(1+(theta**2)/(b*thetac**2))**(-b/2)
-    return E 
 
 def Lorentz_factor(Etheta,n0,t):
     """
@@ -292,14 +283,6 @@ def synch_charene(bfield, partene):
 
 class GRBModel_topstruc:
     """
-    The spectral modelling presented here is based on the picture of particle acceleration at the forward shock,
-    which propagates outwards through the circumburst material (see   `R. D. Blandford, C. F. McKee,Physics of Fluids19, 1130 (1976)`).
-    
-    It is possible to choose between 3 scenario options:
-      - ISM : homogeneous interstellar medium of density n
-      - Wind : density of the material with r^-2 dependance and dictated by a certain value of mass loss rate
-               of the star `mass_loss` (in solar masses per year) and a certain wind speed `wind_speed` (in km/s)
-      - average : an ISM scenario but with parameters of the size of the shock that are an average of the 2 previous cases
       
     Attributes
     ----------
@@ -374,6 +357,8 @@ class GRBModel_topstruc:
 
     def __init__(self, eiso_zero, dens, tstart, tstop, redshift, pars, labels,
                  scenario='ISM',
+                 energy_profile='gaussian',
+                 shells=10.0, # number of concentric shells
                  mass_loss=0,
                  wind_speed=0,
                  cooling_constrain=True,
@@ -423,7 +408,13 @@ class GRBModel_topstruc:
             print("WARNING: No dataset given,")
             print("the code can be used only for computation of theoretical curves")
             
-        self.Eiso = 0  # Eiso of the burst
+        self.Eiso_zero = eiso_zero  # Eiso of the burst
+        self.thetacore = 5 #theta core of the jet in units of grad
+        self.thetaend= 20 # truncation angle outside of which teh energy is initially 0
+        self.energy_profile=energy_profile
+        self.shells= shells
+        self.theta_shells=0
+        self.Eavg_array = 0
         self.density = dens  # ambient density around the burst units of cm-3
         self.tstart = tstart  # units of s
         self.tstop = tstop  # units of s
@@ -458,12 +449,16 @@ class GRBModel_topstruc:
         self.ic_compGG2 = 0  # inverse compton component of the model with gammagamma absorption with METHOD 2
         
     
-    def E_theta_powerlaw(theta, E0, thetac,b):
+    def E_theta_powerlaw(self,theta,b=4.5):
     
-        E=E0*(1+(theta**2)/(b*thetac**2))**(-b/2)
+        E=self.Eiso_zero*(1+(theta**2)/(b*self.thetacore**2))**(-b/2)
         return E 
 
-        
+    def E_theta_gaussian(self,theta):
+    
+        E=self.Eiso_zero*np.exp(-(theta**2)/(2*self.thetacore**2))
+        return E 
+      
     def gammaval(self):
         """
         Computes the Lorentz factor and the size of the region
@@ -482,12 +477,33 @@ class GRBModel_topstruc:
         Time is the average between the tstart and tstop.
         The functions takes automatically the initialization parameters
         """
-
-            
+        
+        theta_array = np.linspace(0, self.thetaend, self.shells+1)
+        theta_inf = theta_array[:-1]  # N elementi
+        theta_sup = theta_array[1:]   # N elementi
+        
         if (self.scenario == 'ISM'):
-            self.gamma = (1. / 8.) ** (3. / 8.) * (3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * self.avtime) ** 3.0))) ** 0.125
-            self.sizer = 8. * c * self.avtime * self.gamma ** 2.
             self.depthpar = 9. / 1.
+            if self.energy_profile=='gaussian':
+              E_theta_array = self.E_theta_gaussian(theta_array)
+            elif self.energy_profile == 'powerlaw':
+                E_theta_array = self.E_theta_powerlaw(theta_array)
+            else:
+                raise ValueError(f"Unknown energy profile: {self.energy_profile}")
+              
+            E_inf=E_theta_array[:-1]  #inf
+            E_sup=E_theta_array[1:]  #sup
+            E_avg=    0.5 * (E_inf + E_sup)         
+            
+            gamma_array = (1. / 8.) ** (3. / 8.) * (3.0 * E_avg / (4.0 * np.pi * self.density * mpc2_erg * (c * self.avtime) ** 3.0)) ** 0.125
+            R_array = 8. * c * self.avtime * gamma_array ** 2
+            
+            theta_shells = 0.5 * (theta_inf + theta_sup)
+            
+            self.theta_shells = theta_shells
+            self.gamma = gamma_array
+            self.sizer = R_array
+            self.Eavg_array = E_avg
         else:
             text = "Chosen scenario: %s\n" \
                    "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
@@ -575,7 +591,10 @@ class GRBModel_topstruc:
         
         # ------------------- Volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM ----------------
         #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
-        vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
+        #vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
+        
+        for i in len(self.gamma):
+          volume_element= self.sizer(i)**2*(self.depthpar*self.gamma(i))
         shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
         self.shock_energy = shock_energy
         
