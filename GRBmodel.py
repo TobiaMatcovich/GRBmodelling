@@ -534,7 +534,9 @@ class GRBModel1:
         #---------------------------------------------------------------------------------------------------------------------
         Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
         Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
+        print(len(Lsy))
         phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
+        
         #----------------------------------------------------------------------------------------------------------------------
         self.esycool = (synch_charene(bfield, ebreak))
         self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
@@ -545,8 +547,8 @@ class GRBModel1:
                                       nEed=20)
         
         #--------------------------- SYN and IC in detector frame-------------------------------------
-        self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
-        self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
+        self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
+        self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
         #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------

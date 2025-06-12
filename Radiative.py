@@ -317,8 +317,8 @@ class Synchrotron(BaseElectron):
         Ec = (3 * e.value * hbar.cgs.value * self.B.to("G").value * self._gamma**2)/ (2 * (m_e * c).cgs.value)
         
         EgEc=validated_energy.to("erg").value/np.vstack(Ec)        
-        dNdE = factor * Gtilde(EgEc)
-        spectrum = (trapz_loglog(np.vstack(self._nelec) * dNdE, self._gamma, axis=0) / u.s / u.erg )
+        dNdEdt = factor * Gtilde(EgEc)
+        spectrum = (trapz_loglog(np.vstack(self._nelec) * dNdEdt, self._gamma, axis=0) / u.s / u.erg )
         spectrum = spectrum.to("1/(s eV)")
         
         return spectrum

@@ -358,7 +358,8 @@ class GRBModel_topstruc:
     def __init__(self, eiso_zero, dens, tstart, tstop, redshift, pars, labels,
                  scenario='ISM',
                  energy_profile='gaussian',
-                 shells=10.0, # number of concentric shells
+                 shells=10, # number of concentric shells
+                 thetaend=20.0*u.deg,
                  mass_loss=0,
                  wind_speed=0,
                  cooling_constrain=True,
@@ -409,8 +410,8 @@ class GRBModel_topstruc:
             print("the code can be used only for computation of theoretical curves")
             
         self.Eiso_zero = eiso_zero  # Eiso of the burst
-        self.thetacore = 5 #theta core of the jet in units of grad
-        self.thetaend= 20 # truncation angle outside of which teh energy is initially 0
+        self.thetacore = 5.0*u.deg #theta core of the jet in units of grad
+        self.thetaend= thetaend # truncation angle outside of which teh energy is initially 0
         self.energy_profile=energy_profile
         self.shells= shells
         self.theta_shells=0
@@ -479,6 +480,7 @@ class GRBModel_topstruc:
         """
         
         theta_array = np.linspace(0, self.thetaend, self.shells+1)
+        #theta_array = np.linspace(0, self.thetaend.to_value(u.deg), self.shells + 1) * u.deg
         theta_inf = theta_array[:-1]  # N elementi
         theta_sup = theta_array[1:]   # N elementi
         
@@ -497,7 +499,6 @@ class GRBModel_topstruc:
             
             gamma_array = (1. / 8.) ** (3. / 8.) * (3.0 * E_avg / (4.0 * np.pi * self.density * mpc2_erg * (c * self.avtime) ** 3.0)) ** 0.125
             R_array = 8. * c * self.avtime * gamma_array ** 2
-            
             theta_shells = 0.5 * (theta_inf + theta_sup)
             
             self.theta_shells = theta_shells
@@ -509,10 +510,8 @@ class GRBModel_topstruc:
                    "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
             raise ValueError(text)          
           
-    def calc_photon_density(self, Lsy, sizereg):
+    def calc_photon_density(self, Lsy, sizereg,theta_inf,theta_sup,deltaR):
         """
-        This is a thin shell, we use the approximation that the radiation is emitted in a region with radius sizereg.
-        (see e.g. Atoyan, Aharonian, 1996). No correction factor (2.24) needed because of thin shell.
 
         Parameters
         ----------
@@ -527,7 +526,9 @@ class GRBModel_topstruc:
             Photon density in the considered emission region.
         """
         
-        return Lsy / (4. * np.pi * sizereg ** 2. * c * u.cm / u.s)
+        Omega_i = 2 * np.pi * (np.cos(theta_inf) - np.cos(theta_sup))
+
+        return Lsy / (Omega_i * sizereg ** 2.*deltaR * c * u.cm / u.s)
       
     def load_model_and_prior(self):
         """
@@ -575,6 +576,15 @@ class GRBModel_topstruc:
            electron_distribution : tuple
              electron distribution as tuple energy, electron_distribution(energy) in units of erg
         """
+        n_shells = self.shells  # ad esempio
+        energy_grid = data['energy']  # array di energie, dimensione (n_energy,)
+        n_energy = len(energy_grid)
+
+        # Inizializza una matrice vuota (n_shells x n_energy)
+        self.ic_comp = np.zeros((n_shells, n_energy)) #* (u.erg / (u.cm**2 * u.s * u.eV))  # con unità
+        self.synch_comp = np.zeros((n_shells, n_energy))# * (u.erg / (u.cm**2 * u.s * u.eV)) 
+        self.synch_comp = np.zeros((n_shells, n_energy))
+        #-------------------------------------------------------------------------------------------------
 
         eta_e = 10. ** pars[0] # parameter 0: fraction of available energy ending in non-thermal electrons
         self.eta_e = eta_e
@@ -589,94 +599,110 @@ class GRBModel_topstruc:
         doppler = self.gamma  # assumption of doppler boosting ~ Gamma
         size_reg = self.sizer * u.cm  # size of the region as astropy quantity
         
+        theta_array = np.linspace(0, self.thetaend, self.shells+1)
+        theta_inf = theta_array[:-1]  # N elementi
+        theta_sup = theta_array[1:]   # N elementi
+        
         # ------------------- Volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM ----------------
         #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
         #vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
         
-        for i in len(self.gamma):
-          volume_element= self.sizer(i)**2*(self.depthpar*self.gamma(i))
-        shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
-        self.shock_energy = shock_energy
+        for i in range(self.shells):
+          
+          
+          deltaR=self.sizer[i]/(self.depthpar*self.gamma[i])
+          Omega_i = 2 * np.pi * (np.cos(theta_inf[i]) - np.cos(theta_sup[i]))
+          volume_element= self.sizer[i]**2.*deltaR*Omega_i
+          print(f"volume:{volume_element}")
+          
+          shock_energy = 2. * self.gamma[i] ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
+          #self.shock_energy = shock_energy
         
-        eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
-        self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
+          eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
+          self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
         
-        #---------------------------------------------------------------------------------------------------------------------------
-        ampl = 1. / u.eV  # temporary amplitude
-        ECBPL = Models.ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
-        #---------------------------------------------- E min iterative process ----------------------------------------------------
-        Emin_0=1e9*u.eV
-        Emin_0_exp=9
-        energies = np.logspace(Emin_0_exp, np.log10(eemax), 100) * u.eV
-        eldis = ECBPL(energies)
-        fact1 = eta_e * self.gamma * mpc2
-        E_medium = trapz_loglog(energies * eldis, energies) / trapz_loglog(eldis, energies)
-        K=E_medium/fact1
+           #---------------------------------------------------------------------------------------------------------------------------
+          ampl = 1. / u.eV  # temporary amplitude
+          ECBPL = Models.ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
+          #---------------------------------------------- E min iterative process ----------------------------------------------------
+          Emin_0=1e9*u.eV
+          Emin_0_exp=9
+          energies = np.logspace(Emin_0_exp, np.log10(eemax), 100) * u.eV
+          eldis = ECBPL(energies)
+          fact1 = eta_e * self.gamma[i] * mpc2
+          E_medium = trapz_loglog(energies * eldis, energies) / trapz_loglog(eldis, energies)
+          K=E_medium/fact1
         
-        emin= Emin_0/K  # calculation of the minimum injection energy. See detailed model explanationn(! iteration)
-        self.Emin = emin
-        #--------------------------------------------- E min non iterative process -------------------------------------------------
+          emin= Emin_0/K  # calculation of the minimum injection energy. See detailed model explanationn(! iteration)
+          self.Emin = emin
+          #--------------------------------------------- E min non iterative process -------------------------------------------------
         
-        #emin=(p-2)/(p-1)*fact1 # p=? abbiamo una broken powerlaw, quindi sono 2 
+          #emin=(p-2)/(p-1)*fact1 # p=? abbiamo una broken powerlaw, quindi sono 2 
         
-        #----------- (https://www.cv.nrao.edu/~sransom/web/Ch5.html)------------------------
-        SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-        #----------------------------------------------------------------------------------------------------------------------------
+          #----------- (https://www.cv.nrao.edu/~sransom/web/Ch5.html)------------------------
+          SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+          print(f"{type(SYN)}")
+          #----------------------------------------------------------------------------------------------------------------------------
         
-        amplitude = ((eta_e * shock_energy * vol) / SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
+          amplitude = ((eta_e * shock_energy * volume_element) / SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
         
-        ECBPL = Models.ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
-        SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-        self.Wesyn = SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
+          ECBPL = Models.ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
+          SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
+          #self.Wesyn = SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
         
-        #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption -----------
+          #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption -----------
         
-        cutoff_charene = np.log10((synch_charene(bfield, e_cutoff)).value)      # characteristic energy at the electron cutoff
-        min_synch_ene = -4                                                      # minimum energy to start sampling the synchrotron spectrum
-        bins_per_decade = 20                                                    # 20 bins per decade to sample the synchrotron spectrum
-        bins = int((cutoff_charene - min_synch_ene) * bins_per_decade)
+          cutoff_charene = np.log10((synch_charene(bfield, e_cutoff)).value)      # characteristic energy at the electron cutoff
+          min_synch_ene = -4                                                      # minimum energy to start sampling the synchrotron spectrum
+          bins_per_decade = 20                                                    # 20 bins per decade to sample the synchrotron spectrum
+          bins = int((cutoff_charene - min_synch_ene) * bins_per_decade)
         
-        #---------------------------------------------------------------------------------------------------------------------
-        Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
-        Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
-        phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
+          #---------------------------------------------------------------------------------------------------------------------
+          Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
+          print(f"Esy {len(Esy)}")
+          
+          Lsy = SYN.flux(Esy, distance=0 * u.cm) # number of synchrotron photons per energy per time (units of 1/eV/s)
+          print(len(Lsy))
+          phn_sy = self.calc_photon_density(Lsy, size_reg[i],theta_inf[i],theta_sup[i],deltaR)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
         #----------------------------------------------------------------------------------------------------------------------
-        self.esycool = (synch_charene(bfield, ebreak))
-        self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
+          self.esycool = (synch_charene(bfield, ebreak))
+          self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
         
         
-        IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], 
-                                      Eemin=emin, Eemax=eemax * u.eV, 
-                                      nEed=20)
+          IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], 
+                                        Eemin=emin, Eemax=eemax * u.eV, 
+                                        nEed=20)
         
-        #--------------------------- SYN and IC in detector frame-------------------------------------
-        self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)
-        self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)
+          #--------------------------- SYN and IC in detector frame-------------------------------------
+          self.synch_comp[i,:] = (doppler[i] ** 2.) * SYN.sed(data['energy'] / doppler[i] * redf, distance=self.Dl)
+          self.ic_comp [i,:] =    (doppler[i] ** 2.) *  IC.sed(data['energy'] / doppler[i]* redf, distance=self.Dl)
+          #model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
+
+          """#-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
+          # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
+          tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
+          
+          #--------------------------------METHOD 1 ---------------------------------------------------------------------
+          #self.synch_compGG = self.synch_comp * np.exp(-tauval)
+          #self.ic_compGG = self.ic_comp * np.exp(-tauval)
+          #model = (self.synch_compGG + self.ic_compGG) 
+
+          #-------------------------------- METHOD 2 --------------------------------------------------------------------
+          mask = tauval > 1.0e-4  # fixed level, you can choose another one
+          self.synch_compGG2 = self.synch_comp.copy()
+          self.ic_compGG2 = self.ic_comp.copy()
+          self.synch_compGG2[mask] = self.synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+          self.ic_compGG2[mask] = self.ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+          model = (self.synch_compGG2 + self.ic_compGG2) """
+          
+          #-------------------- save the electron distrivution ---------------------------
+          ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
+          eldis = ECBPL(ener)  # Compute the electron distribution
+          electron_distribution = (ener, eldis)
+        
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
-
-        #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
-        # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
-        tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
         
-        #--------------------------------METHOD 1 ---------------------------------------------------------------------
-        #self.synch_compGG = self.synch_comp * np.exp(-tauval)
-        #self.ic_compGG = self.ic_comp * np.exp(-tauval)
-        #model = (self.synch_compGG + self.ic_compGG) 
-
-        #-------------------------------- METHOD 2 --------------------------------------------------------------------
-        mask = tauval > 1.0e-4  # fixed level, you can choose another one
-        self.synch_compGG2 = self.synch_comp.copy()
-        self.ic_compGG2 = self.ic_comp.copy()
-        self.synch_compGG2[mask] = self.synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
-        self.ic_compGG2[mask] = self.ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
-        model = (self.synch_compGG2 + self.ic_compGG2) 
-        
-        #-------------------- save the electron distrivution ---------------------------
-        ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
-        eldis = ECBPL(ener)  # Compute the electron distribution
-        electron_distribution = (ener, eldis)
-        
-        return model,model_wo_abs, electron_distribution  # returns model and electron distribution
+        return model_wo_abs, electron_distribution  # model returns model and electron distribution
 
 
     def get_Benergydensity(self):
