@@ -349,6 +349,7 @@ class GRBModel1:
         self.avtime = (tstart + tstop) / 2.  # units of s
         self.redshift = redshift
         self.Dl = cosmo.luminosity_distance(redshift)  # luminosity distance with units
+        self.B=0
         self.pars = pars  # parameters for the fit
         self.labels = labels  # labels of the parameters
         self.scenario = scenario  # string valid options: 'average', 'Wind', 'ISM'
@@ -482,6 +483,7 @@ class GRBModel1:
         e_cutoff = (10. ** pars[3]) * u.TeV  # parameter 3: High energy cutoff of the electron distribution (as log10)
         
         bfield = 10. ** (pars[4]) * u.G  # parameter 4: Magnetic field (as log10)
+        self.B=bfield
         redf = 1. + self.redshift  # redshift factor
         
         doppler = self.gamma  # assumption of doppler boosting ~ Gamma
@@ -536,7 +538,7 @@ class GRBModel1:
         Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
         print(len(Lsy))
         phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
-        
+        print(f"Photon density: {phn_sy}")
         #----------------------------------------------------------------------------------------------------------------------
         self.esycool = (synch_charene(bfield, ebreak))
         self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
@@ -720,4 +722,27 @@ class GRBModel1:
         plt.grid(True, which="both", linestyle="--", alpha=0.6)
         plt.show
         #---------------------------------------------------------------------------------------------------- 
+      
+    def print_GRB_status(self):
+        print("")
+        print("###############################   GRB status   #########################################")
+        print("")
+        print(f"Isotropic Energy: {self.Eiso}")
+        print(f"Ambient density around the burst units of cm-3: {self.density}")
+        print(f"Average evaluation time: {self.avtime} s")
+        print(f"Redshift: {self.redshift}")
+        print(f"Luminosity Distance: {self.Dl}")
+        print(f"Scenario: {self.scenario}")
+        print("---------------------------------------------------------------------------------------")
+        print(f"Gamma factor (Boosting): {self.gamma}")
+        print(f"Radius of the shell: {self.sizer}")
+        print(f"Shock energy density (omega): {self.shock_energy}")
+        print(f"Minimum injection energy for the particle distribution: {self.Emin}")
+        print(f"Total energy in the electrons: {self.Wesyn}")
+        print(f"Fraction of thermal energy going into electron energy: {self.eta_e}")
+        print(f"Fraction of thermal energy going into magnetic field: {self.eta_b}")
+        print("")
+        print("###############################   GRB status   #########################################")
+        print("")
+ 
       
