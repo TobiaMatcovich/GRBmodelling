@@ -414,6 +414,7 @@ class GRBModel_topstruc:
         self.thetaend= thetaend # truncation angle outside of which teh energy is initially 0
         self.energy_profile=energy_profile
         self.shells= shells
+        self.theta_limits=0
         self.theta_shells=0
         self.Eavg_array = 0
         self.density = dens  # ambient density around the burst units of cm-3
@@ -422,6 +423,7 @@ class GRBModel_topstruc:
         self.avtime = (tstart + tstop) / 2.  # units of s
         self.redshift = redshift
         self.Dl = cosmo.luminosity_distance(redshift)  # luminosity distance with units
+        self.B=0
         self.pars = pars  # parameters for the fit
         self.labels = labels  # labels of the parameters
         self.scenario = scenario  # string valid options: 'average', 'Wind', 'ISM'
@@ -455,7 +457,7 @@ class GRBModel_topstruc:
         #E = np.zeros_like(theta)
         #inside = theta <= thetaw_deg
         Eiso_zero=self.Eiso_zero
-        E = Eiso_zero * np.exp(-(theta**2) / (2 * thetacore_deg**2))
+        E = Eiso_zero * np.exp(-(theta**2) / (2 * thetacore_deg**2))/np.exp(-(theta**2) / (2 * thetacore_deg**2))
         return E 
       
     def E_theta_powerlaw(self,theta,thetaw_deg,b=4.5):
@@ -467,7 +469,7 @@ class GRBModel_topstruc:
         E[inside] =Eiso_zero * (1 + (theta[inside]**2) / (b * thetacore_deg**2))**(-b/2)
         return E 
       
-    def gammaval(self):
+    def gammaval(self,avtime):
         """
         Computes the Lorentz factor and the size of the region
         Expression from Blandford&McKee,1976.
@@ -486,35 +488,29 @@ class GRBModel_topstruc:
         The functions takes automatically the initialization parameters
         """
         
-        theta_array = self.theta_shells
-        theta_inf = theta_array[:-1]  # N elementi
-        theta_sup = theta_array[1:]   # N elementi
+        theta_shells = self.theta_shells
+
         
         if (self.scenario == 'ISM'):
             self.depthpar = 9. / 1.
             if self.energy_profile=='gaussian':
-              E_theta_array = self.E_theta_gaussian(theta_array, thetaw_deg=12)
+                E_avg_array = self.E_theta_gaussian(theta_shells, thetaw_deg=12)
             elif self.energy_profile == 'powerlaw':
-                E_theta_array = self.E_theta_powerlaw(theta_array,thetaw_deg=20,b=4.5)
+                E_avg_array = self.E_theta_powerlaw(theta_shells,thetaw_deg=20,b=4.5)
             else:
-                raise ValueError(f"Unknown energy profile: {self.energy_profile}")
-              
-            E_inf=E_theta_array[:-1]  #inf
-            E_sup=E_theta_array[1:]  #sup
-            E_avg=    0.5 * (E_inf + E_sup)         
+                raise ValueError(f"Unknown energy profile: {self.energy_profile}")       
             
-            gamma_array = (1. / 8.) ** (3. / 8.) * (3.0 * E_avg / (4.0 * np.pi * self.density * mpc2_erg * (c * self.avtime) ** 3.0)) ** 0.125
-            R_array = 8. * c * self.avtime * gamma_array ** 2
-            theta_shells = 0.5 * (theta_inf + theta_sup)
+            gamma_array = (1. / 8.) ** (3. / 8.) * (3.0 * E_avg_array / (4.0 * np.pi * self.density * mpc2_erg * (c * avtime) ** 3.0)) ** 0.125
+            R_array = 8. * c * avtime * gamma_array ** 2
             
-            self.theta_shells = theta_shells
             self.gamma = gamma_array
             self.sizer = R_array
-            self.Eavg_array = E_avg
+            self.Eavg_array = E_avg_array
         else:
             text = "Chosen scenario: %s\n" \
                    "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
-            raise ValueError(text)          
+            raise ValueError(text)    
+                
           
     def calc_photon_density(self, Lsy, sizereg,theta_inf,theta_sup,deltaR):
         """
@@ -532,9 +528,9 @@ class GRBModel_topstruc:
             Photon density in the considered emission region.
         """
         
-        Omega_i = 2 * np.pi * (np.cos(theta_inf) - np.cos(theta_sup))
+        Omega_i = 2 * np.pi * (np.cos(np.radians(theta_inf)) - np.cos(np.radians(theta_sup)))*2
 
-        return Lsy / (Omega_i * sizereg ** 2.*deltaR * c * u.cm / u.s)
+        return Lsy / (Omega_i * sizereg ** 2. * c * u.cm / u.s)
       
     def load_model_and_prior(self):
         """
@@ -545,12 +541,18 @@ class GRBModel_topstruc:
         Modify here if you want to change the model
         or the priors
         """
-        self.theta_shells = np.linspace(0, self.thetaend, self.shells+1)
+        theta_limits = np.linspace(0, self.thetaend, self.shells+1)
+        self.theta_limits=theta_limits 
+        theta_inf = theta_limits[:-1]  # N elementi
+        theta_sup = theta_limits[1:]
+        theta_shells = 0.5 * (theta_inf + theta_sup)
+        self.theta_shells=theta_shells 
+        
         self.shock_energy=np.zeros(self.shells)*u.erg
-        #theta_array = np.linspace(0, self.thetaend.to_value(u.deg), self.shells + 1) * u.deg
+        
 
         
-        self.gammaval()  # call the function to compute the basic GRB initialization parameters
+        self.gammaval(self.avtime)  # call the function to compute the basic GRB initialization parameters
         self.naimamodel = self._SSCmodel_ind1fixed
         #-------------------------- change here for the prior functions -------------------------------------
         # For performance it is better to use if statements here to avoid having them in the prior function
@@ -591,8 +593,8 @@ class GRBModel_topstruc:
         n_energy = len(energy_grid)
 
         # Inizializza una matrice vuota (n_shells x n_energy)
-        self.ic_comp = np.zeros((n_shells, n_energy)) #* (u.erg / (u.cm**2 * u.s * u.eV))  # con unità
-        self.synch_comp = np.zeros((n_shells, n_energy))# * (u.erg / (u.cm**2 * u.s * u.eV)) 
+        self.ic_comp = np.zeros((n_shells, n_energy))    #* (u.erg / (u.cm**2 * u.s * u.eV))  # con unità
+        self.synch_comp = np.zeros((n_shells, n_energy)) # * (u.erg / (u.cm**2 * u.s * u.eV)) 
         self.synch_comp = np.zeros((n_shells, n_energy))
         #-------------------------------------------------------------------------------------------------
 
@@ -604,6 +606,7 @@ class GRBModel_topstruc:
         e_cutoff = (10. ** pars[3]) * u.TeV  # parameter 3: High energy cutoff of the electron distribution (as log10)
         
         bfield = 10. ** (pars[4]) * u.G  # parameter 4: Magnetic field (as log10)
+        self.B=bfield
         redf = 1. + self.redshift  # redshift factor
         
         doppler = self.gamma  # assumption of doppler boosting ~ Gamma
@@ -621,8 +624,16 @@ class GRBModel_topstruc:
           
           
           deltaR=self.sizer[i]/(self.depthpar*self.gamma[i])
-          Omega_i = 2 * np.pi * (np.cos(theta_inf[i]) - np.cos(theta_sup[i]))
+          angl=np.cos(np.radians(theta_inf[i])) - np.cos(np.radians(theta_sup[i]))
+          Omega_i = 2 * np.pi * (np.cos(np.radians(theta_inf[i])) - np.cos(np.radians(theta_sup[i])))*2
           volume_element= self.sizer[i]**2.*deltaR*Omega_i
+          
+          print(f"theta inf:{theta_inf[i]}")
+          print(f"theta sup:{theta_sup[i]}")
+          print(f"angl:{angl}")
+          print(f"Solid angle:{Omega_i}")
+          print(f"Delta R:{deltaR}")
+          print(f"Radius:{self.sizer}")
           print(f"volume:{volume_element}")
           
           shock_energy = 2. * self.gamma[i] ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
@@ -631,7 +642,7 @@ class GRBModel_topstruc:
           eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
           self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
         
-           #---------------------------------------------------------------------------------------------------------------------------
+          #--------------------------------------------------------------------------------------------------------------------------
           ampl = 1. / u.eV  # temporary amplitude
           ECBPL = Models.ExponentialCutoffBrokenPowerLaw(ampl, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
           #---------------------------------------------- E min iterative process ----------------------------------------------------
@@ -669,12 +680,12 @@ class GRBModel_topstruc:
         
           #---------------------------------------------------------------------------------------------------------------------
           Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
-          print(f"Esy {len(Esy)}")
+          #print(f"Esy {len(Esy)}")
           
           Lsy = SYN.flux(Esy, distance=0 * u.cm) # number of synchrotron photons per energy per time (units of 1/eV/s)
-          print(len(Lsy))
+          print(f"Lsy 100:{Lsy[100]}")
           phn_sy = self.calc_photon_density(Lsy, size_reg[i],theta_inf[i],theta_sup[i],deltaR)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
-          print(f"Photon density: {phn_sy}")
+          print(f"Photon density: {phn_sy[100]}")
         #----------------------------------------------------------------------------------------------------------------------
           self.esycool = (synch_charene(bfield, ebreak))
           self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
@@ -685,7 +696,10 @@ class GRBModel_topstruc:
                                         nEed=20)
         
           #--------------------------- SYN and IC in detector frame-------------------------------------
+          print(f"Doppler:{doppler[i]}")
           self.synch_comp[i,:] = (doppler[i] ** 2.) * SYN.sed(data['energy'] / doppler[i] * redf, distance=self.Dl)
+    
+          
           self.ic_comp [i,:] =    (doppler[i] ** 2.) *  IC.sed(data['energy'] / doppler[i]* redf, distance=self.Dl)
           #model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
@@ -861,35 +875,37 @@ class GRBModel_topstruc:
         plt.show
         #---------------------------------------------------------------------------------------------------- 
       
-      
+
+          
+        
     def print_GRB_status(self):
         
         print("")
-        print("###############################   GRB status   #########################################")
+        print("###############################   Structured GRB status - START  #########################################")
         print("")
-        print(f"Isotropic Energy(0)-on axis: {self.Eiso_zero}")
+        print(f"Isotropic Energy(0)-on axis: {self.Eiso_zero} erg")
         print(f"Ambient density around the burst units of cm-3: {self.density}")
         print(f"Average evaluation time: {self.avtime} s")
         print(f"Redshift: {self.redshift}")
         print(f"Luminosity Distance: {self.Dl}")
         print(f"Scenario: {self.scenario}")
+        print(f"Magnetic field B: {self.B}")
+        print(f"eta e: {self.eta_e}")
+        print(f"eta B: {self.eta_b}")
         print(f"---------------------------------------------------------------------------------------")
         print(f"Energy profile: {self.energy_profile}")
         print(f"Number of concentric shells: {self.shells}")
         print(f"Gamma factor (Boosting): {self.gamma}")
-        print(f"Radius of the shell: {self.sizer}")
+        radii=self.sizer*u.cm
+        print(f"Radii of the shells: {radii.to(u.pc)}")
         print(f"Shock energy omega: {self.shock_energy}")
         print(f"Theta core: {self.thetacore}")
-        
+        print(f"Theta limits: {self.theta_limits}")
         print(f"Theta shells: {self.theta_shells}")
         print(f"Average Energies array: {self.Eavg_array}")
-        
         print(f"Minimum injection energy for the particle distribution: {self.Emin}")
         print(f"Total energy in the electrons: {self.Wesyn}")
-        print(f"Fraction of thermal energy going into electron energy: {self.eta_e}")
-        print(f"Fraction of thermal energy going into magnetic field: {self.eta_b}")
         print("")
-        print("###############################   GRB status   #########################################")
+        print("###############################   Structured GRB status - END   #########################################")
         print("")
-        
         

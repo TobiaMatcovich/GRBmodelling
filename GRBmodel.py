@@ -379,7 +379,7 @@ class GRBModel1:
         
         
         
-    def gammaval(self):
+    def gammaval(self,avtime):
         """
         Computes the Lorentz factor and the size of the region
         Expression from Blandford&McKee,1976.
@@ -400,13 +400,17 @@ class GRBModel1:
 
             
         if (self.scenario == 'ISM'):
-            self.gamma = (1. / 8.) ** (3. / 8.) * (3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * self.avtime) ** 3.0))) ** 0.125
-            self.sizer = 8. * c * self.avtime * self.gamma ** 2.
+            gamma = (1. / 8.) ** (3. / 8.) * (3.0 * self.Eiso / (4.0 * np.pi * self.density * mpc2_erg * ((c * avtime) ** 3.0))) ** 0.125
+            self.gamma=gamma
+            radius = 8. * c * avtime * self.gamma ** 2.
+            self.sizer = radius
             self.depthpar = 9. / 1.
         else:
             text = "Chosen scenario: %s\n" \
                    "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
-            raise ValueError(text)          
+            raise ValueError(text)       
+        
+        return gamma,radius   
           
     def calc_photon_density(self, Lsy, sizereg):
         """
@@ -438,7 +442,7 @@ class GRBModel1:
         or the priors
         """
 
-        self.gammaval()  # call the function to compute the basic GRB initialization parameters
+        self.gammaval(self.avtime)  # call the function to compute the basic GRB initialization parameters
         self.naimamodel = self._SSCmodel_ind1fixed
         #-------------------------- change here for the prior functions -------------------------------------
         # For performance it is better to use if statements here to avoid having them in the prior function
@@ -491,8 +495,15 @@ class GRBModel1:
         
         # ------------------- Volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM ----------------
         #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
-        vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
-        shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
+        deltaR=self.sizer / (9. * self.gamma)
+        solid_angle=4.0*np.pi
+        vol = solid_angle * self.sizer ** 2. * deltaR
+        
+        print(f"Radius:{self.sizer}")
+        print(f"depth:{deltaR}")
+        print(f"volume:{vol}")
+        
+        shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg *u.erg#/u.cm**3 # available energy in the shock
         self.shock_energy = shock_energy
         
         eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
@@ -536,9 +547,9 @@ class GRBModel1:
         #---------------------------------------------------------------------------------------------------------------------
         Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
         Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
-        print(len(Lsy))
+        print(f"Lsy 100:{Lsy[100]}")
         phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
-        print(f"Photon density: {phn_sy}")
+        print(f"Photon density 100: {phn_sy[100]}")
         #----------------------------------------------------------------------------------------------------------------------
         self.esycool = (synch_charene(bfield, ebreak))
         self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
@@ -549,7 +560,9 @@ class GRBModel1:
                                       nEed=20)
         
         #--------------------------- SYN and IC in detector frame-------------------------------------
+        print(f"doppler:{doppler}")
         self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
+        
         self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
@@ -725,24 +738,66 @@ class GRBModel1:
       
     def print_GRB_status(self):
         print("")
-        print("###############################   GRB status   #########################################")
+        print("###############################   GRB status - START   #########################################")
         print("")
-        print(f"Isotropic Energy: {self.Eiso}")
+        print(f"Isotropic Energy: {self.Eiso} erg")
         print(f"Ambient density around the burst units of cm-3: {self.density}")
         print(f"Average evaluation time: {self.avtime} s")
         print(f"Redshift: {self.redshift}")
         print(f"Luminosity Distance: {self.Dl}")
         print(f"Scenario: {self.scenario}")
+        print(f"Magnetic field B: {self.B}")
+        print(f"eta e: {self.eta_e}")
+        print(f"eta B: {self.eta_b}")
         print("---------------------------------------------------------------------------------------")
         print(f"Gamma factor (Boosting): {self.gamma}")
-        print(f"Radius of the shell: {self.sizer}")
+        radius=self.sizer*u.cm
+        print(f"Radius of the shell: {radius.to(u.pc):.3f}")
         print(f"Shock energy density (omega): {self.shock_energy}")
         print(f"Minimum injection energy for the particle distribution: {self.Emin}")
         print(f"Total energy in the electrons: {self.Wesyn}")
-        print(f"Fraction of thermal energy going into electron energy: {self.eta_e}")
-        print(f"Fraction of thermal energy going into magnetic field: {self.eta_b}")
         print("")
-        print("###############################   GRB status   #########################################")
+        print("###############################   GRB status - END   #########################################")
         print("")
  
+    def plot_gamma_radius_vs_time(self, tmin=1, tmax=1e7, num=200):
+      """
+      Plotta Gamma(t) e R(t) usando la funzione self.gammaval()
       
+      Parametri:
+      - tmin, tmax: intervallo di tempo in secondi
+      - num: numero di punti nel plot
+      """
+
+      times = np.logspace(np.log10(tmin), np.log10(tmax), num) * u.s
+      gammas = []
+      radii = []
+
+      for t in times:
+          gamma, radius = self.gammaval(t.to_value(u.s))
+          gammas.append(gamma)
+          radii.append(radius)
+
+      radii_pc = (np.array(radii) * u.cm).to(u.pc).value
+
+      # Crea sottografi
+      fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+      fig.suptitle("Shell evolution in time (2D)", fontsize=16)
+
+      # Plot Gamma(t)
+      ax1.plot(times.to_value(u.s), gammas, color='tab:blue')
+      ax1.set_ylabel(r"$\Gamma$")
+      ax1.set_xscale('log')
+      ax1.grid(True)
+      ax1.set_title("Lorentz factor evolution")
+
+      # Plot R(t)
+      ax2.plot(times.to_value(u.s), radii_pc, color='tab:green')
+      ax2.set_xlabel("Tempo [s]")
+      ax2.set_ylabel("Raggio [pc]")
+      ax2.set_xscale('log')
+      ax2.grid(True)
+      ax2.set_title("Radius evolution")
+
+      plt.tight_layout(rect=[0, 0, 1, 0.95])  # spazio per il titolo globale
+      plt.show()
