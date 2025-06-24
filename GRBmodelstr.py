@@ -434,18 +434,20 @@ class GRBModel_topstruc:
         self.gamma = 0  # Gamma factor of the GRB at certain time
         self.sizer = 0  # External radius of the shell
         self.depthpar = 0  # private attribute to control the depth of the shock: d = R/(self.depthpar * Gamma)
+        self.shell_dept=0
+        self.volume=0
         self.shock_energy = 0  # Available energy in the shock
         self.Emin = 0 * u.eV  # Minimum injection energy for the particle distribution
         self.Wesyn = 0  # Total energy in the electrons
         self.eta_e = 0  # Fraction of thermal energy going into electron energy
         self.eta_b = 0  # Fraction of thermal energy going into magnetic field
-        self.synch_comp = 0  # Spectrum of the synchrotron component
-        self.ic_comp = 0  # Spectrum of the IC component
         self.naimamodel = 0  # Model used for the fit - initialized in later function
         self.lnprior = 0  # Prior used for the fit - initialized in later function
         self.load_model_and_prior()  # Loads the model and the relative prior
         self.esycool = 0  # Characteristic synchrotron energy corresponding to the break energy of the electrons
         self.synchedens = 0  # total energy density of synchrotron photons
+        self.synch_comp = 0  # Spectrum of the synchrotron component
+        self.ic_comp = 0  # Spectrum of the IC component
         self.synch_compGG = 0  # synchrotron component of the model with gammagamma absorption with METHOD 1
         self.ic_compGG = 0  # inverse compton component of the model with gammagamma absorption with METHOD 1
         self.synch_compGG2 = 0  # synchrotron component of the model with gammagamma absorption with METHOD 2
@@ -457,7 +459,7 @@ class GRBModel_topstruc:
         #E = np.zeros_like(theta)
         #inside = theta <= thetaw_deg
         Eiso_zero=self.Eiso_zero
-        E = Eiso_zero * np.exp(-(theta**2) / (2 * thetacore_deg**2))/np.exp(-(theta**2) / (2 * thetacore_deg**2))
+        E = Eiso_zero * np.exp(-(theta**2) / (2 * thetacore_deg**2))
         return E 
       
     def E_theta_powerlaw(self,theta,thetaw_deg,b=4.5):
@@ -549,9 +551,10 @@ class GRBModel_topstruc:
         self.theta_shells=theta_shells 
         
         self.shock_energy=np.zeros(self.shells)*u.erg
-        
-
-        
+        self.shell_dept=np.zeros(self.shells)
+        self.volume=np.zeros(self.shells)
+      
+      
         self.gammaval(self.avtime)  # call the function to compute the basic GRB initialization parameters
         self.naimamodel = self._SSCmodel_ind1fixed
         #-------------------------- change here for the prior functions -------------------------------------
@@ -593,9 +596,10 @@ class GRBModel_topstruc:
         n_energy = len(energy_grid)
 
         # Inizializza una matrice vuota (n_shells x n_energy)
-        self.ic_comp = np.zeros((n_shells, n_energy))    #* (u.erg / (u.cm**2 * u.s * u.eV))  # con unità
         self.synch_comp = np.zeros((n_shells, n_energy)) # * (u.erg / (u.cm**2 * u.s * u.eV)) 
-        self.synch_comp = np.zeros((n_shells, n_energy))
+        self.ic_comp = np.zeros((n_shells, n_energy))    # * (u.erg / (u.cm**2 * u.s * u.eV))  # con unità
+        self.synch_compGG2 = np.zeros((n_shells, n_energy))
+        self.ic_compGG2= np.zeros((n_shells, n_energy)) 
         #-------------------------------------------------------------------------------------------------
 
         eta_e = 10. ** pars[0] # parameter 0: fraction of available energy ending in non-thermal electrons
@@ -620,24 +624,21 @@ class GRBModel_topstruc:
         #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
         #vol = 4. * np.pi * self.sizer ** 2. * (self.sizer / (9. * self.gamma))
         
+        model_wo_abs= np.zeros_like(data['energy'])
+        model= np.zeros_like(data['energy'])
+        
         for i in range(self.shells):
           
           
           deltaR=self.sizer[i]/(self.depthpar*self.gamma[i])
-          angl=np.cos(np.radians(theta_inf[i])) - np.cos(np.radians(theta_sup[i]))
+          self.shell_dept[i]=deltaR
           Omega_i = 2 * np.pi * (np.cos(np.radians(theta_inf[i])) - np.cos(np.radians(theta_sup[i])))*2
           volume_element= self.sizer[i]**2.*deltaR*Omega_i
-          
-          print(f"theta inf:{theta_inf[i]}")
-          print(f"theta sup:{theta_sup[i]}")
-          print(f"angl:{angl}")
-          print(f"Solid angle:{Omega_i}")
-          print(f"Delta R:{deltaR}")
-          print(f"Radius:{self.sizer}")
-          print(f"volume:{volume_element}")
+          self.volume[i]=volume_element
           
           shock_energy = 2. * self.gamma[i] ** 2. * self.density * mpc2_erg * u.erg  # available energy in the shock
           self.shock_energy[i] = shock_energy
+
         
           eemax = e_cutoff.value * 1e13 # maximum energy of the electron distribution, based on 10 * cut-off value in eV (1 order more then cutoff)
           self.eta_b = (bfield.value ** 2 / (np.pi * 8.)) / shock_energy.value  # ratio between magnetic field energy and shock energy   
@@ -662,10 +663,11 @@ class GRBModel_topstruc:
         
           #----------- (https://www.cv.nrao.edu/~sransom/web/Ch5.html)------------------------
           SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-          print(f"{type(SYN)}")
+      
           #----------------------------------------------------------------------------------------------------------------------------
         
           amplitude = ((eta_e * shock_energy * volume_element) / SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)) / u.eV
+
         
           ECBPL = Models.ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
           SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
@@ -680,32 +682,33 @@ class GRBModel_topstruc:
         
           #---------------------------------------------------------------------------------------------------------------------
           Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
-          #print(f"Esy {len(Esy)}")
-          
+        
           Lsy = SYN.flux(Esy, distance=0 * u.cm) # number of synchrotron photons per energy per time (units of 1/eV/s)
-          print(f"Lsy 100:{Lsy[100]}")
           phn_sy = self.calc_photon_density(Lsy, size_reg[i],theta_inf[i],theta_sup[i],deltaR)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
-          print(f"Photon density: {phn_sy[100]}")
+ 
+          
         #----------------------------------------------------------------------------------------------------------------------
           self.esycool = (synch_charene(bfield, ebreak))
           self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
-        
-        
+                
           IC = Radiative.InverseCompton(ECBPL, seed_photon_fields=[['SSC', Esy, phn_sy]], 
-                                        Eemin=emin, Eemax=eemax * u.eV, 
-                                        nEed=20)
+                                        Eemin=emin, Eemax=eemax * u.eV, nEed=20)
         
           #--------------------------- SYN and IC in detector frame-------------------------------------
-          print(f"Doppler:{doppler[i]}")
-          self.synch_comp[i,:] = (doppler[i] ** 2.) * SYN.sed(data['energy'] / doppler[i] * redf, distance=self.Dl)
-    
+        
+          synch_comp=(doppler[i] ** 2.) * SYN.sed(data['energy'] / doppler[i] * redf, distance=self.Dl)*redf    
+          ic_comp=(doppler[i] ** 2.) *  IC.sed(data['energy'] / doppler[i]* redf, distance=self.Dl)*redf
           
-          self.ic_comp [i,:] =    (doppler[i] ** 2.) *  IC.sed(data['energy'] / doppler[i]* redf, distance=self.Dl)
-          #model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
+          self.synch_comp[i,:] = synch_comp 
+          self.ic_comp [i,:] =   ic_comp 
+          
+          SSC_wo_abs = self.synch_comp[i,:] + self.ic_comp [i,:]
+          model_wo_abs += SSC_wo_abs
+          
 
-          """#-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
+          #-------------------------- Gamma Gamma Absorption ----------------------------------------------------------------------
           # Optical depth in a shell of width R/(9*Gamma) after transformation of the gamma ray energy of the data in the grb frame
-          tauval = tau_val(data['energy'] / doppler * redf, Esy, phn_sy, self.sizer / (9 * self.gamma) * u.cm)
+          tauval = tau_val(data['energy'] / doppler[i] * redf, Esy, phn_sy, self.sizer[i] / (9 * self.gamma[i]) * u.cm)
           
           #--------------------------------METHOD 1 ---------------------------------------------------------------------
           #self.synch_compGG = self.synch_comp * np.exp(-tauval)
@@ -714,20 +717,20 @@ class GRBModel_topstruc:
 
           #-------------------------------- METHOD 2 --------------------------------------------------------------------
           mask = tauval > 1.0e-4  # fixed level, you can choose another one
-          self.synch_compGG2 = self.synch_comp.copy()
-          self.ic_compGG2 = self.ic_comp.copy()
-          self.synch_compGG2[mask] = self.synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
-          self.ic_compGG2[mask] = self.ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
-          model = (self.synch_compGG2 + self.ic_compGG2) """
+          self.synch_compGG2[i,:] = synch_comp.copy()
+          self.ic_compGG2[i,:] = ic_comp.copy()
+          self.synch_compGG2[i,:][mask] = synch_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+          self.ic_compGG2[i,:][mask] = ic_comp[mask] / (tauval[mask]) * (1. - np.exp(-tauval[mask]))
+          SSC = self.synch_compGG2[i,:] + self.ic_compGG2[i,:]
+          model += SSC
           
           #-------------------- save the electron distrivution ---------------------------
           ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
           eldis = ECBPL(ener)  # Compute the electron distribution
           electron_distribution = (ener, eldis)
         
-        model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
         
-        return model_wo_abs, electron_distribution  # model returns model and electron distribution
+        return model,model_wo_abs, electron_distribution  # model returns model and electron distribution
 
 
     def get_Benergydensity(self):
@@ -875,7 +878,28 @@ class GRBModel_topstruc:
         plt.show
         #---------------------------------------------------------------------------------------------------- 
       
-
+    def plot_jet_profile(self):
+        
+        theta = np.linspace(0, np.radians(30), 500)
+        plt.figure(figsize=(8,5))
+        if self.energy_profile=='gaussian':
+              E = self.E_theta_gaussian(theta, thetaw_deg=12)
+              plt.plot(np.degrees(theta), E, label=r"Gaussiano troncato °" )
+        elif self.energy_profile == 'powerlaw':
+              E = self.E_theta_powerlaw(theta,thetaw_deg=20,b=4.5)
+              plt.plot(np.degrees(theta), E, label=fr"Power-law, $b$ = {4.5}")
+        else:
+                raise ValueError(f"Unknown energy profile: {self.energy_profile}")   
+        
+        plt.xlabel("θ (gradi)")
+        plt.ylabel(r"$E_{\mathrm{iso}}(\theta)$ [erg]")
+        plt.title("Profilo angolare dell'energia isotropica")
+        plt.yscale("log")
+        #plt.ylim(1e-3, 1e1)
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
           
         
     def print_GRB_status(self):
@@ -896,8 +920,15 @@ class GRBModel_topstruc:
         print(f"Energy profile: {self.energy_profile}")
         print(f"Number of concentric shells: {self.shells}")
         print(f"Gamma factor (Boosting): {self.gamma}")
-        radii=self.sizer*u.cm
-        print(f"Radii of the shells: {radii.to(u.pc)}")
+        radius=self.sizer*u.cm
+        deltaR=self.shell_dept*u.cm
+        volume=self.volume*u.cm**3
+        for r in radius:
+          print(f"Radius of the shell: {r.to(u.pc):.3e} or {r.to(u.km):.3e}")
+        for d in deltaR:
+          print(f"Dept of the shell: {d.to(u.pc):.3e} or {d.to(u.km):.3e}")
+        for v in volume:
+          print(f"Volume of the shell: {v.to(u.pc**3):.3e} or {v.to(u.km**3):.3e}")
         print(f"Shock energy omega: {self.shock_energy}")
         print(f"Theta core: {self.thetacore}")
         print(f"Theta limits: {self.theta_limits}")

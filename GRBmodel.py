@@ -360,6 +360,8 @@ class GRBModel1:
         self.gamma = 0  # Gamma factor of the GRB at certain time
         self.sizer = 0  # External radius of the shell
         self.depthpar = 0  # private attribute to control the depth of the shock: d = R/(self.depthpar * Gamma)
+        self.shell_dept=0
+        self.volume=0
         self.shock_energy = 0  # Available energy in the shock
         self.Emin = 0 * u.eV  # Minimum injection energy for the particle distribution
         self.Wesyn = 0  # Total energy in the electrons
@@ -495,13 +497,12 @@ class GRBModel1:
         
         # ------------------- Volume shell where the emission takes place. The factor 9 comes from considering the shock in the ISM ----------------
         #  (Eq. 7 from GRB190829A paper from H.E.S.S. Collaboration)
-        deltaR=self.sizer / (9. * self.gamma)
+        deltaR=self.sizer / (self.depthpar * self.gamma)
+        self.shell_dept=deltaR
+        
         solid_angle=4.0*np.pi
         vol = solid_angle * self.sizer ** 2. * deltaR
-        
-        print(f"Radius:{self.sizer}")
-        print(f"depth:{deltaR}")
-        print(f"volume:{vol}")
+        self.volume=vol
         
         shock_energy = 2. * self.gamma ** 2. * self.density * mpc2_erg *u.erg#/u.cm**3 # available energy in the shock
         self.shock_energy = shock_energy
@@ -547,9 +548,7 @@ class GRBModel1:
         #---------------------------------------------------------------------------------------------------------------------
         Esy = np.logspace(min_synch_ene, cutoff_charene + 1, bins) * u.eV
         Lsy = SYN.flux(Esy, distance=0 * u.cm)  # number of synchrotron photons per energy per time (units of 1/eV/s)
-        print(f"Lsy 100:{Lsy[100]}")
         phn_sy = self.calc_photon_density(Lsy, size_reg)   # number density of synchrotron photons (dn/dE) units of 1/eV/cm3
-        print(f"Photon density 100: {phn_sy[100]}")
         #----------------------------------------------------------------------------------------------------------------------
         self.esycool = (synch_charene(bfield, ebreak))
         self.synchedens = trapz_loglog(Esy * phn_sy, Esy, axis=0).to('erg / cm3')
@@ -560,9 +559,8 @@ class GRBModel1:
                                       nEed=20)
         
         #--------------------------- SYN and IC in detector frame-------------------------------------
-        print(f"doppler:{doppler}")
+
         self.synch_comp = (doppler ** 2.) * SYN.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
-        
         self.ic_comp =    (doppler ** 2.) *  IC.sed(data['energy'] / doppler * redf, distance=self.Dl)*redf
         model_wo_abs = (self.synch_comp+self.ic_comp) # Total model without absorption
 
@@ -587,7 +585,7 @@ class GRBModel1:
         ener = np.logspace(np.log10(emin.to('GeV').value), 8,500) * u.GeV  # Energy range to save the electron distribution from emin to 10^8 GeV
         eldis = ECBPL(ener)  # Compute the electron distribution
         electron_distribution = (ener, eldis)
-        
+
         return model,model_wo_abs, electron_distribution  # returns model and electron distribution
 
 
@@ -752,7 +750,11 @@ class GRBModel1:
         print("---------------------------------------------------------------------------------------")
         print(f"Gamma factor (Boosting): {self.gamma}")
         radius=self.sizer*u.cm
-        print(f"Radius of the shell: {radius.to(u.pc):.3f}")
+        deltaR=self.shell_dept*u.cm
+        volume=self.volume*(u.cm)**3
+        print(f"Radius of the shell: {radius.to(u.pc):.3e} or {radius.to(u.km):.3e}")
+        print(f"Dept of the shell: {deltaR.to(u.pc):.3e} or {deltaR.to(u.km):.3e}")
+        print(f"Volume of the shell: {volume.to(u.pc**3):.3e} or {volume.to(u.km**3):.3e}")
         print(f"Shock energy density (omega): {self.shock_energy}")
         print(f"Minimum injection energy for the particle distribution: {self.Emin}")
         print(f"Total energy in the electrons: {self.Wesyn}")
