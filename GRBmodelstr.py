@@ -34,6 +34,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize, LinearSegmentedColormap
 from matplotlib.colorbar import ColorbarBase
 
+
 from scipy.integrate import quad
 
 
@@ -49,7 +50,13 @@ sigma_T = con.sigma_T.cgs.value
 mpc2 = (con.m_p * con.c ** 2.).to('eV')
 mpc2_erg = mpc2.to('erg').value
 
-
+def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
+    new_cmap = LinearSegmentedColormap.from_list(
+        f'trunc({cmap.name},{minval:.2f},{maxval:.2f})',
+        cmap(np.linspace(minval, maxval, n))
+    )
+    return new_cmap
+  
 def Lorentz_factor(Etheta,n0,t):
     """
     Ryan et al 2020 (Afterglowpy)
@@ -466,12 +473,12 @@ class GRBModel_topstruc:
         thetacore_deg=self.thetacore
         Eiso_zero=self.Eiso_zero
         
-        E = np.zeros_like(theta)
-        inside = theta <= thetaw_deg
-        E[inside] =Eiso_zero * (1 + (theta[inside]**2) / (b * thetacore_deg**2))**(-b/2)
+        #E = np.zeros_like(theta)
+        #inside = theta <= thetaw_deg
+        E =Eiso_zero * (1 + (theta**2) / (b * thetacore_deg**2))**(-b/2)
         return E 
       
-    def gammaval(self,avtime):
+    def gammaval(self,avtime,theta):
         """
         Computes the Lorentz factor and the size of the region
         Expression from Blandford&McKee,1976.
@@ -490,29 +497,34 @@ class GRBModel_topstruc:
         The functions takes automatically the initialization parameters
         """
         
-        theta_shells = self.theta_shells
+        #theta_shells = self.theta_shells
+        theta = np.atleast_1d(theta)
 
         
         if (self.scenario == 'ISM'):
             self.depthpar = 9. / 1.
             if self.energy_profile=='gaussian':
-                E_avg_array = self.E_theta_gaussian(theta_shells, thetaw_deg=12)
+                Energy = self.E_theta_gaussian(theta, thetaw_deg=12)
             elif self.energy_profile == 'powerlaw':
-                E_avg_array = self.E_theta_powerlaw(theta_shells,thetaw_deg=20,b=4.5)
+                Energy = self.E_theta_powerlaw(theta,thetaw_deg=20,b=4.5)
             else:
                 raise ValueError(f"Unknown energy profile: {self.energy_profile}")       
             
-            gamma_array = (1. / 8.) ** (3. / 8.) * (3.0 * E_avg_array / (4.0 * np.pi * self.density * mpc2_erg * (c * avtime) ** 3.0)) ** 0.125
-            R_array = 8. * c * avtime * gamma_array ** 2
+            Gamma = (1. / 8.) ** (3. / 8.) * (3.0 * Energy / (4.0 * np.pi * self.density * mpc2_erg * (c * avtime) ** 3.0)) ** 0.125
+            R = 8. * c * avtime * Gamma ** 2
             
-            self.gamma = gamma_array
-            self.sizer = R_array
-            self.Eavg_array = E_avg_array
+            self.gamma = Gamma
+            self.sizer = R
+            self.Eavg_array = Energy
         else:
             text = "Chosen scenario: %s\n" \
                    "The scenario indicated not found. Please choose 'ISM' scenario" % self.scenario
             raise ValueError(text)    
-                
+        
+        if Gamma.size == 1:
+          return Gamma[0], R[0]
+        else:
+          return Gamma, R
           
     def calc_photon_density(self, Lsy, sizereg,theta_inf,theta_sup,deltaR):
         """
@@ -555,7 +567,7 @@ class GRBModel_topstruc:
         self.volume=np.zeros(self.shells)
       
       
-        self.gammaval(self.avtime)  # call the function to compute the basic GRB initialization parameters
+        self.gammaval(self.avtime, self.theta_shells)  # call the function to compute the basic GRB initialization parameters
         self.naimamodel = self._SSCmodel_ind1fixed
         #-------------------------- change here for the prior functions -------------------------------------
         # For performance it is better to use if statements here to avoid having them in the prior function
@@ -671,7 +683,7 @@ class GRBModel_topstruc:
         
           ECBPL = Models.ExponentialCutoffBrokenPowerLaw(amplitude, 1. * u.TeV, ebreak, alpha1, alpha2, e_cutoff)
           SYN = Radiative.Synchrotron(ECBPL, B=bfield, Eemin=emin, Eemax=eemax * u.eV, nEed=20)
-          #self.Wesyn = SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
+          self.Wesyn += SYN.compute_Etot(Eemin=emin, Eemax=eemax * u.eV)           # E tot in the electron distribution
         
           #----- energy array to compute the target photon number density to compute IC radiation and gamma-gamma absorption -----------
         
@@ -939,4 +951,122 @@ class GRBModel_topstruc:
         print("")
         print("###############################   Structured GRB status - END   #########################################")
         print("")
+
+
+    def plot_gamma_R_3D_range(self, t_min, t_max, theta_min, theta_max, n_t=100, n_theta=100,slice=False,elevation=30,azimut=45):
+        """
+        Plotta due superfici 3D:
+        - Gamma(theta, time)
+        - R(theta, time)
+        """
+
+        time_array = np.logspace(np.log10(t_min), np.log10(t_max), n_t)
+        T_log = np.log10(time_array)
+
+        theta_array = np.linspace(theta_min, theta_max, n_theta)
+
+        # build the grid
+        T, Theta = np.meshgrid(T_log, theta_array, indexing='ij')
+        Gamma_grid = np.zeros_like(T)
+        R_grid = np.zeros_like(T)
+
+        # evaluate Gamma and R on the Grid 
+        for i, t in enumerate(time_array):
+            Gamma_row, R_row = self.gammaval(avtime=t, theta=theta_array)
+            Gamma_grid[i, :] = Gamma_row
+            R_grid[i, :] = R_row
+
+        # ------------------------------- PLOT ------------------------------------------
+        fig = plt.figure(figsize=(16, 8))
+        fig.suptitle(f"Gamma and Radius vs Time: {self.energy_profile.capitalize()} profile",fontsize=16)
         
+        # Plot Gamma
+        ax1 = fig.add_subplot(121, projection='3d')
+        surf1 = ax1.plot_surface(T, Theta, Gamma_grid,alpha=0.7, cmap='viridis')
+        ax1.set_xlabel('log10(Time [s])')
+        ax1.set_ylabel('Theta [rad]')
+        ax1.set_zlabel('Gamma')
+        ax1.set_title(r"$\Gamma(\theta, t)$")
+        ax1.view_init(elev=elevation, azim=azimut)
+        cbar1 = fig.colorbar(surf1, ax=ax1, shrink=0.8, aspect=20)
+        cbar1.set_label('Gamma factor', fontsize=12)
+
+        # Plot R
+        ax2 = fig.add_subplot(122, projection='3d')
+        surf2 = ax2.plot_surface(T, Theta, R_grid,alpha=0.7, cmap='plasma')
+        ax2.set_xlabel('log10(Time [s])')
+        ax2.set_ylabel('Theta [deg]')
+        ax2.set_zlabel('Radius [cm]')
+        ax2.set_title(r"$R(\theta, t)$")
+        ax2.view_init(elev=elevation, azim=azimut)
+        cbar2 = fig.colorbar(surf2, ax=ax2, shrink=0.8, aspect=20)
+        cbar2.set_label('Radius', rotation=270, labelpad=15, fontsize=12)
+        
+        #----------------------------- Slice = True ---------------------------------------------
+        if slice:
+          
+          theta_array=self.theta_shells
+          norm = Normalize(vmin=np.min(theta_array), vmax=np.max(theta_array))
+          colormap1 = cm.viridis  # puoi usare anche 'plasma', 'inferno', etc.
+          colormap2 = cm.plasma
+          
+          for theta_val in theta_array:
+            Gamma_vals, R_vals = self.gammaval(avtime=time_array, theta=theta_val)
+            
+            color1 = colormap1(norm(theta_val))
+            color2 = colormap2(norm(theta_val))
+            
+            # Gamma curve
+            ax1.plot(np.log10(time_array),[theta_val]*len(time_array), Gamma_vals,
+                color=color2, linestyle='-',linewidth=2.5,alpha=1.0, label=f'θ={theta_val:.0f}°')
+
+            # R curve
+            ax2.plot(np.log10(time_array),[theta_val]*len(time_array),R_vals,
+                color=color1, linestyle='-', linewidth=2.5,alpha=1.0,label=f'θ={theta_val:.0f}°')
+
+          ax1.legend(loc='best')
+          ax2.legend(loc='best')
+
+          plt.subplots_adjust(wspace=0.4)
+          plt.tight_layout()
+          plt.show()
+          
+          fig_slice = plt.figure(figsize=(16, 8))
+          fig_slice, (axg, axr) = plt.subplots(1, 2, figsize=(16, 7), sharex=True)
+          #axg = fig.add_subplot(121)
+          #axr = fig.add_subplot(122)
+          
+          fig_slice.suptitle(f"Slices of Gamma e Radius vs Time \nProfilo: {self.energy_profile.capitalize()}, θ ∈ [{np.min(theta_array):.0f}°, {np.max(theta_array):.0f}°]",
+                            fontsize=16)
+
+          for theta_val in theta_array:
+              Gamma_vals, R_vals = self.gammaval(avtime=time_array, theta=theta_val)
+
+              label = f'θ={theta_val:.0f}°'
+              color1 = colormap1(norm(theta_val))
+              color2 = colormap2(norm(theta_val))
+
+              axg.plot(time_array, Gamma_vals, label=label, linewidth=2.5,color=color2)
+              axr.plot(time_array, R_vals, label=label, linewidth=2.5,color=color1)
+
+          axg.set_xscale('log')
+          axr.set_xscale('log')
+
+          axg.set_xlabel('Time [s]')
+          axg.set_ylabel('Gamma')
+          axg.set_title(r"$\Gamma(\theta, t)$")
+
+          axr.set_xlabel('Time [s]')
+          axr.set_ylabel('Radius [cm]')
+          axr.set_title(r"$R(\theta, t)$")
+
+          axg.legend()
+          axr.legend()
+          
+          axg.grid(True, which='both', linestyle='--', alpha=0.6)
+          axr.grid(True, which='both', linestyle='--', alpha=0.6)
+
+          plt.tight_layout()
+          plt.show()
+
+
